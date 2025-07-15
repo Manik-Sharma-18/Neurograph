@@ -1,24 +1,31 @@
+# core/propagation.py
+
 import torch
 from core.cell import PhaseCell
 from core.node_store import NodeStore
-from core.graph import load_or_build_graph
-
+from core.radiation import get_radiation_neighbors
 
 def propagate_step(
     active_nodes: dict,
     node_store: NodeStore,
     phase_cell: PhaseCell,
     graph_df,
+    lookup_table,
+    use_radiation: bool = True,
+    top_k_neighbors: int = 4,
     device='cpu'
 ):
     """
-    One timestep of forward propagation.
+    One timestep of hybrid forward propagation (static + radiation).
 
     Args:
         active_nodes (dict): node_id → (context_phase_idx, context_mag_idx)
         node_store (NodeStore): Provides self phase/mag index vectors
         phase_cell (PhaseCell): Lookup + signal unit
         graph_df (pd.DataFrame): Static topology
+        lookup_table: LookupTableModule with cos/exp
+        use_radiation (bool): Whether to apply dynamic phase-based propagation
+        top_k_neighbors (int): Number of dynamic neighbors
         device: CPU or CUDA
 
     Returns:
@@ -30,10 +37,29 @@ def propagate_step(
         ctx_phase_idx = ctx_phase_idx.to(device)
         ctx_mag_idx = ctx_mag_idx.to(device)
 
-        # For each target connected to source_node
-        for target_node in graph_df.loc[graph_df["node_id"] == source_node, "input_connections"].values[0]:
+        # --- Static conduction ---
+        static_targets = graph_df.loc[
+            graph_df["node_id"] == source_node, "input_connections"
+        ].values[0]
+
+        all_targets = list(static_targets)
+
+        # --- Dynamic radiation ---
+        if use_radiation:
+            dynamic_targets = get_radiation_neighbors(
+                current_node_id=source_node,
+                ctx_phase_idx=ctx_phase_idx,
+                node_store=node_store,
+                graph_df=graph_df,
+                lookup_table=lookup_table,
+                top_k=top_k_neighbors
+            )
+            all_targets += dynamic_targets
+
+        # --- Propagate to all targets ---
+        for target_node in all_targets:
             self_phase_idx = node_store.get_phase(target_node).to(device)
-            self_mag_idx   = node_store.get_mag(target_node).to(device)
+            self_mag_idx = node_store.get_mag(target_node).to(device)
 
             phase_out, mag_out, _, strength = phase_cell(
                 ctx_phase_idx, ctx_mag_idx, self_phase_idx, self_mag_idx
