@@ -1,7 +1,7 @@
 # core/cell.py
 
+import torch
 import torch.nn as nn
-
 
 class PhaseCell(nn.Module):
     def __init__(self, vector_dim: int, lookup_module):
@@ -10,7 +10,7 @@ class PhaseCell(nn.Module):
 
         Args:
             vector_dim (int): Dimensionality of phase/magnitude vectors
-            lookup_module (LookupTableModule): Cos and exp(sin) tables
+            lookup_module (ExtendedLookupTableModule): Includes cos/sin tables
         """
         super().__init__()
         self.D = vector_dim
@@ -31,14 +31,25 @@ class PhaseCell(nn.Module):
             mag_out:   LongTensor [D] — summed mag indices (mod M)
             signal:    FloatTensor [D] — element-wise signal = cos ⊙ exp
             activation_strength: Float — sum(signal)
+            grad_phase: FloatTensor [D] — d(signal)/d(phase)
+            grad_mag:   FloatTensor [D] — d(signal)/d(mag)
         """
+        # Add and wrap indices
         phase_out = (ctx_phase_idx + self_phase_idx) % self.N
         mag_out   = (ctx_mag_idx + self_mag_idx) % self.M
 
-        cos_vals = self.lookup.lookup_phase(phase_out)     # [D]
-        exp_vals = self.lookup.lookup_magnitude(mag_out)   # [D]
+        # Forward values
+        cos_vals = self.lookup.lookup_phase(phase_out)         # [D]
+        exp_vals = self.lookup.lookup_magnitude(mag_out)       # [D]
+        signal   = cos_vals * exp_vals                         # [D]
 
-        signal = cos_vals * exp_vals
+        # Gradients
+        dcos = self.lookup.lookup_phase_grad(phase_out)        # [D]
+        dexp = self.lookup.lookup_magnitude_grad(mag_out)      # [D]
+
+        grad_phase = dcos * exp_vals                           # d(signal)/d(phase)
+        grad_mag   = cos_vals * dexp                           # d(signal)/d(mag)
+
         strength = signal.sum()
 
-        return phase_out, mag_out, signal, strength
+        return phase_out, mag_out, signal, strength, grad_phase, grad_mag
