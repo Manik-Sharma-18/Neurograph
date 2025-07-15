@@ -15,9 +15,10 @@ max_timesteps: 6
 top_k_neighbors: 4
 
 # Learning
-learning_rate: 0.001
+learning_rate: 0.01
 optimizer: adam
 loss_type: cross_entropy
+warmup_epochs: 5
 
 # Model
 use_ste: true
