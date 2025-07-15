@@ -1,0 +1,28 @@
+# Graph structure
+total_nodes: 35
+num_input_nodes: 5
+num_output_nodes: 5
+vector_dim: 5
+phase_bins: 8
+mag_bins: 256
+cardinality: 3
+seed: 42
+
+# Forward pass behavior
+decay_factor: 0.95
+min_activation_strength: 0.001
+max_timesteps: 6
+top_k_neighbors: 4
+
+# Learning
+learning_rate: 0.001
+optimizer: adam
+loss_type: cross_entropy
+
+# Model
+use_ste: true
+use_soft_connections: true
+
+# Paths
+graph_path: config/static_graph.pkl
+log_path: logs/
