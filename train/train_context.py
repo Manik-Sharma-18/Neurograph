@@ -1,6 +1,7 @@
 # train/train_context.py
 
 import torch
+import random
 from core.tables import ExtendedLookupTableModule
 from core.graph import load_or_build_graph
 from core.node_store import NodeStore
@@ -8,7 +9,9 @@ from core.cell import PhaseCell
 from core.forward_engine import run_forward
 from core.backward import backward_pass
 from config import load_config
-import random
+
+from modules.input_adapters import MNISTPCAAdapter
+from modules.class_encoding import generate_fixed_class_encodings
 
 def train_context():
     # Load config
@@ -17,39 +20,50 @@ def train_context():
 
     # Load graph
     graph_df = load_or_build_graph(**cfg, overwrite=True)
-    
-    # Initialize modules
+
+    # Initialize graph components
     node_store = NodeStore(graph_df, cfg["vector_dim"], cfg["phase_bins"], cfg["mag_bins"])
     lookup = ExtendedLookupTableModule(cfg["phase_bins"], cfg["mag_bins"], device=device)
     phase_cell = PhaseCell(cfg["vector_dim"], lookup)
 
+    # Setup training components
     output_nodes = node_store.output_nodes
+    input_nodes = list(node_store.input_nodes)
     warmup_epochs = cfg.get("warmup_epochs", 5)
     learning_rate = cfg["learning_rate"]
     num_epochs = cfg.get("num_epochs", 50)
 
+    # Setup MNIST + PCA injector
+    adapter = MNISTPCAAdapter(
+        vector_dim=cfg["vector_dim"],
+        num_input_nodes=len(input_nodes),
+        phase_bins=cfg["phase_bins"],
+        mag_bins=cfg["mag_bins"],
+        device=device
+    )
+
+    # Setup fixed class encodings
+    class_encodings = generate_fixed_class_encodings(
+        cfg["phase_bins"], cfg["mag_bins"], cfg["vector_dim"]
+    )
+
     loss_log = []
-
-    # Use fixed input node + target node pairs (placeholder logic)
-    input_context = {
-        random.choice(list(node_store.input_nodes)): (
-            torch.randint(0, cfg["phase_bins"], (cfg["vector_dim"],)),
-            torch.randint(0, cfg["mag_bins"], (cfg["vector_dim"],))
-        )
-    }
-
-    target_context = {
-        node_id: (
-            torch.zeros(cfg["vector_dim"], dtype=torch.long),
-            torch.zeros(cfg["vector_dim"], dtype=torch.long)
-        )
-        for node_id in output_nodes
-    }
 
     for epoch in range(num_epochs):
         include_all_outputs = epoch < warmup_epochs
 
-        # Forward pass
+        # Get real input + label
+        sample_idx = random.randint(0, len(adapter.mnist) - 1)
+        input_context, label = adapter.get_input_context(sample_idx, input_nodes)
+
+        # Assign the class vector as target for all output nodes
+        class_phase, class_mag = class_encodings[label]
+        target_context = {
+            node_id: (class_phase.clone(), class_mag.clone())
+            for node_id in output_nodes
+        }
+
+        # Run forward pass
         activation = run_forward(
             graph_df=graph_df,
             node_store=node_store,
@@ -68,7 +82,7 @@ def train_context():
             verbose=(epoch % 10 == 0)
         )
 
-        # Compute loss (MSE between signal vector and target)
+        # Compute L2 loss in index space
         total_loss = 0.0
         active_outputs = activation.get_active_context().keys()
         counted_nodes = 0
@@ -78,18 +92,16 @@ def train_context():
                 continue
 
             pred_phase, pred_mag = activation.table.get(node_id, (None, None, None))[:2]
-            tgt_phase, tgt_mag = target_context[node_id]
-
             if pred_phase is None:
                 continue
 
+            tgt_phase, tgt_mag = target_context[node_id]
+
             pred_phase = pred_phase.to(torch.float32)
             tgt_phase = tgt_phase.to(torch.float32)
-
             pred_mag = pred_mag.to(torch.float32)
             tgt_mag = tgt_mag.to(torch.float32)
 
-            # Simple L2 loss in index space
             loss = torch.sum((pred_phase - tgt_phase) ** 2) + torch.sum((pred_mag - tgt_mag) ** 2)
             total_loss += loss.item()
             counted_nodes += 1
