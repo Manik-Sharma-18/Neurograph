@@ -30,14 +30,12 @@ def predict_label_from_output(activation_table, output_nodes, class_encodings, l
     if not vectors:
         return -1  # No active output nodes
 
-    output_vector = torch.cat(vectors, dim=0)
+    output_vector = torch.stack(vectors, dim=0).mean(dim=0)  # Average across output nodes
 
     scores = []
     for digit in range(10):
         tgt_phase, tgt_mag = class_encodings[digit]
-        tgt_vec = torch.cat([
-            lookup_table.lookup_phase(tgt_phase) * lookup_table.lookup_magnitude(tgt_mag)
-        ])
+        tgt_vec = lookup_table.lookup_phase(tgt_phase) * lookup_table.lookup_magnitude(tgt_mag)
         score = cosine_similarity(output_vector, tgt_vec, dim=0)
         scores.append(score.item())
 

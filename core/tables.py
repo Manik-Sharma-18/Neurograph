@@ -40,14 +40,33 @@ class ExtendedLookupTableModule(nn.Module):
         self.register_buffer("exp_table", get_exp_sin_table(M, device))
         self.register_buffer("exp_deriv_table", get_exp_sin_derivative_table(M, device))
 
-    def lookup_phase(self, theta_indices: torch.LongTensor) -> torch.Tensor:
+    def lookup_phase(self, theta_indices: torch.Tensor) -> torch.Tensor:
+        theta_indices = theta_indices.long()  # Ensure long tensor for indexing
         return self.cos_table[theta_indices % self.N]
 
-    def lookup_phase_grad(self, theta_indices: torch.LongTensor) -> torch.Tensor:
+    def lookup_phase_grad(self, theta_indices: torch.Tensor) -> torch.Tensor:
+        theta_indices = theta_indices.long()  # Ensure long tensor for indexing
         return -self.sin_table[theta_indices % self.N]
 
-    def lookup_magnitude(self, mag_indices: torch.LongTensor) -> torch.Tensor:
+    def lookup_magnitude(self, mag_indices: torch.Tensor) -> torch.Tensor:
+        mag_indices = mag_indices.long()  # Ensure long tensor for indexing
         return self.exp_table[mag_indices % self.M]
 
-    def lookup_magnitude_grad(self, mag_indices: torch.LongTensor) -> torch.Tensor:
+    def lookup_magnitude_grad(self, mag_indices: torch.Tensor) -> torch.Tensor:
+        mag_indices = mag_indices.long()  # Ensure long tensor for indexing
         return self.exp_deriv_table[mag_indices % self.M]
+
+    def get_signal_vector(self, phase_indices: torch.Tensor, mag_indices: torch.Tensor) -> torch.Tensor:
+        """
+        Combines phase and magnitude lookups to create a signal vector.
+        
+        Args:
+            phase_indices: tensor of shape [D] with phase bin indices
+            mag_indices: tensor of shape [D] with magnitude bin indices
+            
+        Returns:
+            Signal vector of shape [D] combining phase and magnitude
+        """
+        phase_values = self.lookup_phase(phase_indices)  # [D]
+        mag_values = self.lookup_magnitude(mag_indices)  # [D]
+        return phase_values * mag_values  # Element-wise multiplication [D]

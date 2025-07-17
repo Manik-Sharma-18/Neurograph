@@ -61,7 +61,7 @@ def propagate_step(
             self_phase_idx = node_store.get_phase(target_node).to(device)
             self_mag_idx = node_store.get_mag(target_node).to(device)
 
-            phase_out, mag_out, _, strength = phase_cell(
+            phase_out, mag_out, signal, strength, grad_phase, grad_mag = phase_cell(
                 ctx_phase_idx, ctx_mag_idx, self_phase_idx, self_mag_idx
             )
 

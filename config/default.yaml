@@ -13,16 +13,12 @@ decay_factor: 0.95
 min_activation_strength: 0.001
 max_timesteps: 6
 top_k_neighbors: 4
+use_radiation: true
 
 # Learning
-learning_rate: 0.01
-optimizer: adam
-loss_type: cross_entropy
+learning_rate: 0.001
 warmup_epochs: 5
-
-# Model
-use_ste: true
-use_soft_connections: true
+num_epochs: 50
 
 # Paths
 graph_path: config/static_graph.pkl

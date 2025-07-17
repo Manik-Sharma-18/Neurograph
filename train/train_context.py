@@ -8,10 +8,12 @@ from core.node_store import NodeStore
 from core.cell import PhaseCell
 from core.forward_engine import run_forward
 from core.backward import backward_pass
-from config import load_config
+from utils.config import load_config
 
 from modules.input_adapters import MNISTPCAAdapter
-from modules.class_encoding import generate_fixed_class_encodings
+from modules.class_encoding import generate_digit_class_encodings
+from modules.loss import signal_loss_from_lookup
+
 
 def train_context():
     # Load config
@@ -19,7 +21,12 @@ def train_context():
     device = "cuda" if torch.cuda.is_available() else "cpu"
 
     # Load graph
-    graph_df = load_or_build_graph(**cfg, overwrite=True)
+    graph_keys = [
+        "total_nodes", "num_input_nodes", "num_output_nodes",
+        "vector_dim", "phase_bins", "mag_bins", "cardinality", "seed"
+    ]
+    graph_config = {k: cfg[k] for k in graph_keys}
+    graph_df = load_or_build_graph(**graph_config, overwrite=True)
 
     # Initialize graph components
     node_store = NodeStore(graph_df, cfg["vector_dim"], cfg["phase_bins"], cfg["mag_bins"])
@@ -42,10 +49,14 @@ def train_context():
         device=device
     )
 
-    # Setup fixed class encodings
-    class_encodings = generate_fixed_class_encodings(
-        cfg["phase_bins"], cfg["mag_bins"], cfg["vector_dim"]
-    )
+    # Setup digit class encodings
+    class_phase_encodings, class_mag_encodings = generate_digit_class_encodings(
+        num_classes=10,
+        vector_dim=cfg["vector_dim"],
+        phase_bins=cfg["phase_bins"],
+        mag_bins=cfg["mag_bins"],
+        seed=cfg.get("seed", 42)
+    )   
 
     loss_log = []
 
@@ -57,7 +68,9 @@ def train_context():
         input_context, label = adapter.get_input_context(sample_idx, input_nodes)
 
         # Assign the class vector as target for all output nodes
-        class_phase, class_mag = class_encodings[label]
+        class_phase = class_phase_encodings[label]
+        class_mag   = class_mag_encodings[label]
+
         target_context = {
             node_id: (class_phase.clone(), class_mag.clone())
             for node_id in output_nodes
@@ -102,7 +115,11 @@ def train_context():
             pred_mag = pred_mag.to(torch.float32)
             tgt_mag = tgt_mag.to(torch.float32)
 
-            loss = torch.sum((pred_phase - tgt_phase) ** 2) + torch.sum((pred_mag - tgt_mag) ** 2)
+            loss = signal_loss_from_lookup(
+                    pred_phase, pred_mag,
+                     tgt_phase, tgt_mag,
+                     lookup
+                    )
             total_loss += loss.item()
             counted_nodes += 1
 

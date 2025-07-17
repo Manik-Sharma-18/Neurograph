@@ -1,7 +1,7 @@
 # main.py
 
 from train.train_context import train_context
-from config import load_config
+from utils.config import load_config
 import matplotlib.pyplot as plt
 import os
 import random

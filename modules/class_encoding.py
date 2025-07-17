@@ -23,3 +23,25 @@ def generate_fixed_class_encodings(phase_bins, mag_bins, vector_dim, seed=42):
         mag_idx   = torch.randint(0, mag_bins, (vector_dim,))
         encodings[digit] = (phase_idx, mag_idx)
     return encodings
+
+
+def generate_digit_class_encodings(num_classes=10, vector_dim=5, phase_bins=8, mag_bins=256, seed=42):
+    """
+    Generates fixed target context (phase and magnitude) for digit labels 0–9.
+
+    Returns:
+        phase_encodings: dict[int → torch.LongTensor]
+        mag_encodings: dict[int → torch.LongTensor]
+    """
+    torch.manual_seed(seed)
+
+    phase_encodings = {}
+    mag_encodings = {}
+
+    for digit in range(num_classes):
+        phase = torch.randint(0, phase_bins, (vector_dim,), dtype=torch.long)
+        mag = torch.randint(0, mag_bins, (vector_dim,), dtype=torch.long)
+        phase_encodings[digit] = phase
+        mag_encodings[digit] = mag
+
+    return phase_encodings, mag_encodings
