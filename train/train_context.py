@@ -1,24 +1,39 @@
-# train/train_context.py
+# train/enhanced_train_context.py
 
 import torch
 import random
+import os
 from core.tables import ExtendedLookupTableModule
 from core.graph import load_or_build_graph
 from core.node_store import NodeStore
 from core.cell import PhaseCell
-from core.forward_engine import run_forward
+from core.forward_engine import run_enhanced_forward
 from core.backward import backward_pass
 from utils.config import load_config
 
 from modules.input_adapters import MNISTPCAAdapter
 from modules.class_encoding import generate_digit_class_encodings
 from modules.loss import signal_loss_from_lookup
+from utils.activation_tracker import ActivationFrequencyTracker
+from utils.activation_balancer import ActivationBalancer, MultiOutputLossStrategy
 
 
-def train_context():
+def enhanced_train_context(config_path: str = "config/default.yaml"):
+    """
+    Enhanced training context with activation balancing and multi-output loss support.
+    
+    Args:
+        config_path: Path to configuration file
+        
+    Returns:
+        Tuple of (loss_log, activation_tracker, activation_balancer)
+    """
     # Load config
-    cfg = load_config()
+    cfg = load_config(config_path)
     device = "cuda" if torch.cuda.is_available() else "cpu"
+    
+    print(f"🔧 Using configuration: {config_path}")
+    print(f"📊 Graph size: {cfg['total_nodes']} nodes ({cfg['num_input_nodes']} input, {cfg['num_output_nodes']} output)")
 
     # Load graph
     graph_keys = [
@@ -26,7 +41,8 @@ def train_context():
         "vector_dim", "phase_bins", "mag_bins", "cardinality", "seed"
     ]
     graph_config = {k: cfg[k] for k in graph_keys}
-    graph_df = load_or_build_graph(**graph_config, overwrite=False)
+    graph_df = load_or_build_graph(**graph_config, overwrite=False, 
+                                   save_path=cfg.get("graph_path", "config/static_graph.pkl"))
 
     # Initialize graph components
     node_store = NodeStore(graph_df, cfg["vector_dim"], cfg["phase_bins"], cfg["mag_bins"])
@@ -39,7 +55,10 @@ def train_context():
     warmup_epochs = cfg.get("warmup_epochs", 5)
     learning_rate = cfg["learning_rate"]
     num_epochs = cfg.get("num_epochs", 50)
-    batch_size = cfg.get("batch_size", 5)  # Add batch size from config or default to 5
+    batch_size = cfg.get("batch_size", 5)
+
+    print(f"🎯 Output nodes: {len(output_nodes)} - {output_nodes}")
+    print(f"📥 Input nodes: {len(input_nodes)} - {input_nodes}")
 
     # Setup MNIST + PCA injector
     adapter = MNISTPCAAdapter(
@@ -59,7 +78,41 @@ def train_context():
         seed=cfg.get("seed", 42)
     )   
 
+    # Initialize activation frequency tracker
+    activation_tracker = ActivationFrequencyTracker(
+        output_nodes=output_nodes,
+        num_classes=10
+    )
+
+    # Initialize activation balancer if enabled
+    activation_balancer = None
+    if cfg.get("enable_activation_balancing", False):
+        activation_balancer = ActivationBalancer(
+            output_nodes=output_nodes,
+            strategy=cfg.get("balancing_strategy", "quota"),
+            max_activations_per_epoch=cfg.get("max_activations_per_epoch", 20),
+            min_activations_per_epoch=cfg.get("min_activations_per_epoch", 2),
+            force_activation_probability=cfg.get("force_activation_probability", 0.3)
+        )
+        print(f"⚖️  Activation balancing enabled: {cfg.get('balancing_strategy', 'quota')}")
+
+    # Initialize multi-output loss strategy if enabled
+    multi_output_strategy = None
+    if cfg.get("enable_multi_output_loss", False):
+        multi_output_strategy = MultiOutputLossStrategy(
+            continue_timesteps=cfg.get("continue_timesteps_after_first", 2),
+            max_outputs_to_train=cfg.get("max_outputs_to_train", 3)
+        )
+        print(f"🔄 Multi-output loss enabled: continue {cfg.get('continue_timesteps_after_first', 2)} timesteps")
+
+    # Create log directory
+    log_path = cfg.get("log_path", "logs/")
+    os.makedirs(log_path, exist_ok=True)
+
     loss_log = []
+
+    print(f"\n🚀 Starting enhanced training for {num_epochs} epochs...")
+    print(f"🔥 Warmup period: {warmup_epochs} epochs")
 
     for epoch in range(num_epochs):
         include_all_outputs = epoch < warmup_epochs
@@ -80,8 +133,8 @@ def train_context():
         for input_context in batch_input_contexts:
             merged_input_context.update(input_context)
 
-        # Run forward pass once with merged input context
-        activation = run_forward(
+        # Run enhanced forward pass
+        activation = run_enhanced_forward(
             graph_df=graph_df,
             node_store=node_store,
             phase_cell=phase_cell,
@@ -95,9 +148,26 @@ def train_context():
             max_timesteps=cfg["max_timesteps"],
             use_radiation=cfg["use_radiation"],
             top_k_neighbors=cfg["top_k_neighbors"],
+            min_output_activation_timesteps=cfg.get("min_output_activation_timesteps", 2),
             device=device,
-            verbose=(epoch % 10 == 0)
+            verbose=(epoch % 10 == 0),
+            activation_tracker=activation_tracker,
+            activation_balancer=activation_balancer,
+            multi_output_strategy=multi_output_strategy
         )
+        
+        # Record individual forward passes for each sample in the batch
+        active_outputs = list(activation.get_active_context().keys())
+        active_output_nodes = [n for n in active_outputs if n in output_nodes]
+        
+        # Record activation data for each sample in the batch
+        for batch_idx, label in enumerate(batch_labels):
+            activation_tracker.record_forward_pass(
+                active_outputs=active_output_nodes,
+                activation_timesteps={},  # Filled by enhanced forward engine
+                first_active_output=None,  # Filled by enhanced forward engine
+                true_label=label
+            )
 
         # Compute loss: reconstruct target_context from individual labels
         total_loss = 0.0
@@ -153,9 +223,9 @@ def train_context():
             total_loss /= total_counted_nodes
         loss_log.append(total_loss)
 
-        print(f"[Epoch {epoch+1}] Batch Loss: {total_loss:.4f}")
+        print(f"[Epoch {epoch+1}] Batch Loss: {total_loss:.4f} | Active Outputs: {len(active_output_nodes)}")
 
-        # Backward pass (unchanged) - use the last sample's target context for backward pass
+        # Backward pass - use the last sample's target context for backward pass
         final_label = batch_labels[-1]
         final_target_context = {
             node_id: (class_phase_encodings[final_label].clone(), class_mag_encodings[final_label].clone())
@@ -174,5 +244,44 @@ def train_context():
             verbose=(epoch % 10 == 0),
             device=device
         )
+        
+        # End epoch tracking
+        activation_tracker.end_epoch()
+        if activation_balancer is not None:
+            activation_balancer.end_epoch()
+        
+        # Print periodic diagnostic reports
+        if (epoch + 1) % 10 == 0:
+            print(f"\n📊 Activation Summary after Epoch {epoch + 1}:")
+            summary = activation_tracker.get_activation_summary()
+            if "error" not in summary:
+                print(f"   Active Output Nodes: {summary['unique_active_nodes']}/{len(output_nodes)}")
+                print(f"   Dead Nodes: {summary['dead_nodes']}")
+                print(f"   Dominant Nodes: {summary['dominant_nodes']}")
+                
+            if activation_balancer is not None:
+                balance_summary = activation_balancer.get_balance_summary()
+                if "error" not in balance_summary:
+                    print(f"   Forced Activations: {balance_summary['forced_percentage']:.1f}%")
+                    print(f"   Underutilized: {balance_summary['underutilized_nodes']}")
+                    print(f"   Overutilized: {balance_summary['overutilized_nodes']}")
 
-    return loss_log
+    # Final diagnostic reports
+    print("\n" + "="*80)
+    print("🔍 FINAL ENHANCED TRAINING ANALYSIS")
+    print("="*80)
+    
+    activation_tracker.print_diagnostic_report()
+    
+    if activation_balancer is not None:
+        activation_balancer.print_balance_report()
+    
+    # Generate plots
+    try:
+        activation_tracker.plot_activation_frequency(save_path=os.path.join(log_path, "activation_frequency.png"))
+        activation_tracker.plot_epoch_evolution(save_path=os.path.join(log_path, "epoch_evolution.png"))
+        print(f"📊 Plots saved to {log_path}")
+    except Exception as e:
+        print(f"Warning: Could not generate plots: {e}")
+
+    return loss_log, activation_tracker, activation_balancer

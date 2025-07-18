@@ -1,6 +1,6 @@
 # main.py
 
-from train.enhanced_train_context import enhanced_train_context
+from train.train_context import enhanced_train_context
 from utils.config import load_config
 import matplotlib.pyplot as plt
 import os
@@ -14,7 +14,7 @@ from core.tables import ExtendedLookupTableModule
 from core.graph import load_or_build_graph
 from core.node_store import NodeStore
 from core.cell import PhaseCell
-from core.enhanced_forward_engine import run_enhanced_forward
+from core.forward_engine import run_enhanced_forward
 
 def main():
     cfg = load_config("config/default.yaml")
