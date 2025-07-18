@@ -144,3 +144,11 @@ Thumbs.db
 checkpoints/
 logs/
 outputs/
+
+# Documentation and development files (local only)
+memory-bank/
+.clinerules/
+PROJECT_CONTEXT.md
+
+# Data directory
+data/

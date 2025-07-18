@@ -26,7 +26,7 @@ def train_context():
         "vector_dim", "phase_bins", "mag_bins", "cardinality", "seed"
     ]
     graph_config = {k: cfg[k] for k in graph_keys}
-    graph_df = load_or_build_graph(**graph_config, overwrite=True)
+    graph_df = load_or_build_graph(**graph_config, overwrite=False)
 
     # Initialize graph components
     node_store = NodeStore(graph_df, cfg["vector_dim"], cfg["phase_bins"], cfg["mag_bins"])
@@ -39,6 +39,7 @@ def train_context():
     warmup_epochs = cfg.get("warmup_epochs", 5)
     learning_rate = cfg["learning_rate"]
     num_epochs = cfg.get("num_epochs", 50)
+    batch_size = cfg.get("batch_size", 5)  # Add batch size from config or default to 5
 
     # Setup MNIST + PCA injector
     adapter = MNISTPCAAdapter(
@@ -63,26 +64,29 @@ def train_context():
     for epoch in range(num_epochs):
         include_all_outputs = epoch < warmup_epochs
 
-        # Get real input + label
-        sample_idx = random.randint(0, len(adapter.mnist) - 1)
-        input_context, label = adapter.get_input_context(sample_idx, input_nodes)
+        # Batch processing: collect multiple samples
+        batch_input_contexts = []
+        batch_labels = []
+        
+        # Sample batch_size examples
+        for _ in range(batch_size):
+            sample_idx = random.randint(0, len(adapter.mnist) - 1)
+            input_context, label = adapter.get_input_context(sample_idx, input_nodes)
+            batch_input_contexts.append(input_context)
+            batch_labels.append(label)
 
-        # Assign the class vector as target for all output nodes
-        class_phase = class_phase_encodings[label]
-        class_mag   = class_mag_encodings[label]
+        # Merge all input contexts into one dictionary (assuming no node conflicts)
+        merged_input_context = {}
+        for input_context in batch_input_contexts:
+            merged_input_context.update(input_context)
 
-        target_context = {
-            node_id: (class_phase.clone(), class_mag.clone())
-            for node_id in output_nodes
-        }
-
-        # Run forward pass
+        # Run forward pass once with merged input context
         activation = run_forward(
             graph_df=graph_df,
             node_store=node_store,
             phase_cell=phase_cell,
             lookup_table=lookup,
-            input_context=input_context,
+            input_context=merged_input_context,
             vector_dim=cfg["vector_dim"],
             phase_bins=cfg["phase_bins"],
             mag_bins=cfg["mag_bins"],
@@ -95,47 +99,75 @@ def train_context():
             verbose=(epoch % 10 == 0)
         )
 
-        # Compute L2 loss in index space
+        # Compute loss: reconstruct target_context from individual labels
         total_loss = 0.0
         active_outputs = activation.get_active_context().keys()
-        counted_nodes = 0
+        total_counted_nodes = 0
+        
+        # Average loss over all samples in the batch
+        for batch_idx in range(batch_size):
+            label = batch_labels[batch_idx]
+            class_phase = class_phase_encodings[label]
+            class_mag = class_mag_encodings[label]
 
-        for node_id in output_nodes:
-            if not include_all_outputs and node_id not in active_outputs:
-                continue
+            # Create target context for this sample
+            sample_target_context = {
+                node_id: (class_phase.clone(), class_mag.clone())
+                for node_id in output_nodes
+            }
 
-            pred_phase, pred_mag = activation.table.get(node_id, (None, None, None))[:2]
-            if pred_phase is None:
-                continue
+            # Compute loss for this sample
+            sample_loss = 0.0
+            sample_counted_nodes = 0
 
-            tgt_phase, tgt_mag = target_context[node_id]
+            for node_id in output_nodes:
+                if not include_all_outputs and node_id not in active_outputs:
+                    continue
 
-            pred_phase = pred_phase.to(torch.float32)
-            tgt_phase = tgt_phase.to(torch.float32)
-            pred_mag = pred_mag.to(torch.float32)
-            tgt_mag = tgt_mag.to(torch.float32)
+                pred_phase, pred_mag = activation.table.get(node_id, (None, None, None))[:2]
+                if pred_phase is None:
+                    continue
 
-            loss = signal_loss_from_lookup(
-                    pred_phase, pred_mag,
-                     tgt_phase, tgt_mag,
-                     lookup
-                    )
-            total_loss += loss.item()
-            counted_nodes += 1
+                tgt_phase, tgt_mag = sample_target_context[node_id]
 
-        if counted_nodes > 0:
-            total_loss /= counted_nodes
+                pred_phase = pred_phase.to(torch.float32)
+                tgt_phase = tgt_phase.to(torch.float32)
+                pred_mag = pred_mag.to(torch.float32)
+                tgt_mag = tgt_mag.to(torch.float32)
+
+                loss = signal_loss_from_lookup(
+                        pred_phase, pred_mag,
+                         tgt_phase, tgt_mag,
+                         lookup
+                        )
+                sample_loss += loss.item()
+                sample_counted_nodes += 1
+
+            if sample_counted_nodes > 0:
+                sample_loss /= sample_counted_nodes
+                total_loss += sample_loss
+                total_counted_nodes += 1
+
+        # Average loss over the batch
+        if total_counted_nodes > 0:
+            total_loss /= total_counted_nodes
         loss_log.append(total_loss)
 
-        print(f"[Epoch {epoch+1}] Loss: {total_loss:.4f}")
+        print(f"[Epoch {epoch+1}] Batch Loss: {total_loss:.4f}")
 
-        # Backward pass
+        # Backward pass (unchanged) - use the last sample's target context for backward pass
+        final_label = batch_labels[-1]
+        final_target_context = {
+            node_id: (class_phase_encodings[final_label].clone(), class_mag_encodings[final_label].clone())
+            for node_id in output_nodes
+        }
+
         backward_pass(
             activation_table=activation,
             node_store=node_store,
             phase_cell=phase_cell,
             lookup_table=lookup,
-            target_context=target_context,
+            target_context=final_target_context,
             output_nodes=output_nodes,
             learning_rate=learning_rate,
             include_all_outputs=include_all_outputs,
