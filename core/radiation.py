@@ -36,10 +36,11 @@ def get_radiation_neighbors(
 
     N = lookup_table.N
     ctx_phase = ctx_phase_idx.to(torch.long)
+    device = ctx_phase.device  # Get the device of the context phase
 
     scores = []
     for candidate_id in candidate_nodes:
-        candidate_phase = node_store.get_phase(candidate_id).to(torch.long)  # [D]
+        candidate_phase = node_store.get_phase(candidate_id).to(torch.long).to(device)  # [D] - ensure same device
         phase_sum = (ctx_phase + candidate_phase) % N  # [D]
         cos_values = lookup_table.lookup_phase(phase_sum)  # [D]
         alignment_score = cos_values.sum().item()
