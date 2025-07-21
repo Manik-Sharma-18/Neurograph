@@ -12,7 +12,7 @@ import matplotlib.pyplot as plt
 from datetime import datetime
 import random
 
-from train.train_context_1000 import TrainContext1000 as TrainContext
+from train.train_context_1000 import TrainContext1000
 
 def set_seeds(seed=42):
     """Set random seeds for reproducibility."""
@@ -119,7 +119,7 @@ def main():
     try:
         # Initialize training context
         print("\n🔧 Initializing 1000-Node Training Context...")
-        trainer = TrainContext()
+        trainer = TrainContext1000()
         
         # Display network information
         info = trainer.input_adapter.get_dataset_info()
@@ -199,7 +199,7 @@ def quick_test():
     print("=" * 40)
     
     try:
-        trainer = TrainContext()
+        trainer = TrainContext1000()
         
         # Override config for quick test
         trainer.config['num_epochs'] = 5
