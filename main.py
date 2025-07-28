@@ -1,6 +1,6 @@
 """
-Main Modular NeuroGraph Entry Point
-Comprehensive modular system with gradient accumulation and high-resolution computation
+NeuroGraph Unified Entry Point
+Flexible, config-agnostic training system with optional production features
 """
 
 import sys
@@ -13,9 +13,11 @@ import matplotlib.pyplot as plt
 from datetime import datetime
 import random
 import argparse
+import json
+from typing import Optional
 
-from train.modular_train_context import ModularTrainContext, create_modular_train_context
-from utils.modular_config import ModularConfig
+from train.modular_train_context import create_modular_train_context
+
 
 def set_seeds(seed=42):
     """Set random seeds for reproducibility."""
@@ -25,8 +27,42 @@ def set_seeds(seed=42):
     if torch.cuda.is_available():
         torch.cuda.manual_seed(seed)
 
-def plot_training_curves(losses, accuracies=None, save_path="logs/modular/training_curves.png"):
+
+def determine_config_file(args):
+    """Smart config file selection with flexible defaults."""
+    if args.config:
+        if os.path.exists(args.config):
+            return args.config
+        else:
+            raise FileNotFoundError(f"Specified config file not found: {args.config}")
+    
+    # Smart defaults based on available files and mode
+    candidates = []
+    
+    if args.production:
+        candidates.append('config/production.yaml')
+    
+    candidates.extend([
+        'config/neurograph.yaml',
+        'config/production.yaml',
+        'config/default.yaml'
+    ])
+    
+    for config_path in candidates:
+        if os.path.exists(config_path):
+            print(f"Auto-selected config: {config_path}")
+            return config_path
+    
+    raise FileNotFoundError("No configuration file found. Please specify --config or ensure a default config exists.")
+
+
+def plot_training_curves(losses, accuracies=None, save_path=None, config=None):
     """Plot and save training curves."""
+    if save_path is None and config is not None:
+        save_path = config.get('paths.training_curves_path', 'logs/training_curves.png')
+    elif save_path is None:
+        save_path = "logs/training_curves.png"
+    
     os.makedirs(os.path.dirname(save_path), exist_ok=True)
     
     if accuracies:
@@ -36,384 +72,327 @@ def plot_training_curves(losses, accuracies=None, save_path="logs/modular/traini
     
     # Loss curve
     ax1.plot(losses, 'b-', linewidth=2, label='Training Loss')
-    ax1.set_title('Modular NeuroGraph Training Loss', fontsize=14, fontweight='bold')
+    ax1.set_title('NeuroGraph Training Loss', fontsize=14, fontweight='bold')
     ax1.set_xlabel('Epoch', fontsize=12)
     ax1.set_ylabel('Loss', fontsize=12)
     ax1.grid(True, alpha=0.3)
     ax1.legend()
     
-    # Add loss improvement annotation
-    if len(losses) > 1:
-        improvement = losses[0] - losses[-1]
-        ax1.annotate(f'Improvement: {improvement:+.4f}', 
-                    xy=(len(losses)-1, losses[-1]), 
-                    xytext=(len(losses)*0.7, max(losses)*0.8),
-                    arrowprops=dict(arrowstyle='->', color='red'),
-                    fontsize=10, color='red')
-    
     # Accuracy curve (if available)
     if accuracies:
         ax2.plot(accuracies, 'g-', linewidth=2, label='Validation Accuracy')
-        ax2.set_title('Modular NeuroGraph Validation Accuracy', fontsize=14, fontweight='bold')
+        ax2.set_title('NeuroGraph Validation Accuracy', fontsize=14, fontweight='bold')
         ax2.set_xlabel('Validation Check', fontsize=12)
         ax2.set_ylabel('Accuracy', fontsize=12)
         ax2.grid(True, alpha=0.3)
         ax2.legend()
-        
-        # Add accuracy annotation
-        if len(accuracies) > 0:
-            final_acc = accuracies[-1]
-            ax2.annotate(f'Final: {final_acc:.1%}', 
-                        xy=(len(accuracies)-1, final_acc), 
-                        xytext=(len(accuracies)*0.7, max(accuracies)*0.9),
-                        arrowprops=dict(arrowstyle='->', color='green'),
-                        fontsize=10, color='green')
     
     plt.tight_layout()
     plt.savefig(save_path, dpi=300, bbox_inches='tight')
     plt.close()
-    print(f"📊 Training curves saved to: {save_path}")
+    print(f"Training curves saved to: {save_path}")
 
-def comprehensive_evaluation(trainer, num_samples=300):
-    """Perform comprehensive evaluation of the trained model."""
-    print("\n🔍 Comprehensive Model Evaluation")
-    print("=" * 50)
+
+def evaluate_model(trainer, num_samples=None, use_batch_evaluation=False):
+    """Evaluate the trained model with optional batch optimization."""
+    if num_samples is None:
+        num_samples = trainer.config.get('debugging.evaluation_samples', 300)
     
-    # Overall accuracy
-    accuracy = trainer.evaluate_accuracy(num_samples=num_samples)
+    print(f"\nEvaluating model ({num_samples} samples)...")
     
-    # Per-class analysis
-    print(f"\n📊 Per-class analysis (sample size: {min(num_samples//10, 30)} per class):")
-    class_correct = [0] * 10
-    class_total = [0] * 10
+    if use_batch_evaluation:
+        # Use batch evaluation if available and requested
+        try:
+            accuracy = trainer.evaluate_accuracy(
+                num_samples=num_samples, 
+                use_batch_evaluation=True
+            )
+        except:
+            # Fallback to standard evaluation
+            accuracy = trainer.evaluate_accuracy(num_samples=num_samples)
+    else:
+        accuracy = trainer.evaluate_accuracy(num_samples=num_samples)
     
-    dataset_size = trainer.input_adapter.get_dataset_info()['dataset_size']
-    samples_per_class = min(num_samples // 10, 30)
-    
-    for digit in range(10):
-        # Find samples of this digit
-        digit_indices = []
-        for i in range(dataset_size):
-            if len(digit_indices) >= samples_per_class:
-                break
-            try:
-                _, label = trainer.input_adapter.get_input_context(i, trainer.input_nodes)
-                if label == digit:
-                    digit_indices.append(i)
-            except:
-                continue
-        
-        # Evaluate samples of this digit
-        for idx in digit_indices:
-            try:
-                input_context, true_label = trainer.input_adapter.get_input_context(idx, trainer.input_nodes)
-                output_signals = trainer.forward_pass(input_context)
-                
-                if output_signals:
-                    class_encodings = trainer.class_encoder.get_all_encodings()
-                    logits = trainer.loss_function.compute_logits_from_signals(
-                        output_signals, class_encodings, trainer.lookup_tables
-                    )
-                    pred_label = torch.argmax(logits).item()
-                    
-                    if pred_label == true_label:
-                        class_correct[digit] += 1
-                    class_total[digit] += 1
-            except:
-                continue
-    
-    # Print per-class results
-    for digit in range(10):
-        if class_total[digit] > 0:
-            class_acc = class_correct[digit] / class_total[digit]
-            print(f"   Digit {digit}: {class_correct[digit]}/{class_total[digit]} = {class_acc:.1%}")
-        else:
-            print(f"   Digit {digit}: No samples evaluated")
-    
+    print(f"Accuracy: {accuracy:.1%} (evaluated on {num_samples} samples)")
     return accuracy
 
-def analyze_system_performance(trainer):
-    """Analyze system performance and components."""
-    print("\n📈 System Performance Analysis")
-    print("=" * 50)
-    
-    # Configuration summary
-    config = trainer.config
-    print(f"Architecture:")
-    print(f"   • Total nodes: {config.get('architecture.total_nodes')}")
-    print(f"   • Input nodes: {config.get('architecture.input_nodes')}")
-    print(f"   • Resolution: {config.get('resolution.phase_bins')}×{config.get('resolution.mag_bins')}")
-    print(f"   • Resolution increase: {config.get('resolution.resolution_increase')}x vs legacy")
-    
-    # Input adapter analysis
-    if hasattr(trainer.input_adapter, 'get_projection_stats'):
-        print(f"\nInput Adapter:")
-        stats = trainer.input_adapter.get_projection_stats()
-        if 'weight_norm' in stats:
-            print(f"   • Weight norm: {stats['weight_norm']:.4f}")
-            print(f"   • Condition number: {stats['condition_number']:.2f}")
-    
-    # Class encoding analysis
-    if hasattr(trainer.class_encoder, 'get_encoding_stats'):
-        print(f"\nClass Encodings:")
-        stats = trainer.class_encoder.get_encoding_stats()
-        print(f"   • Orthogonality score: {stats['orthogonality_score']:.3f}")
-        print(f"   • Mean similarity: {stats['mean_similarity']:.3f}")
-        print(f"   • Max similarity: {stats['max_similarity']:.3f}")
-    
-    # Gradient accumulation analysis
-    if trainer.gradient_accumulator is not None:
-        print(f"\nGradient Accumulation:")
-        stats = trainer.gradient_accumulator.get_statistics()
-        print(f"   • Total gradients: {stats['total_gradients_accumulated']}")
-        print(f"   • Total updates: {stats['total_updates_applied']}")
-        print(f"   • Avg gradient norm: {stats['average_gradient_norm']:.4f}")
-        print(f"   • Gradient variance: {stats['gradient_variance']:.4f}")
-    
-    # Memory and parameter analysis
-    print(f"\nSystem Resources:")
-    print(f"   • Total parameters: {trainer.count_parameters():,}")
-    print(f"   • Memory usage: {trainer.estimate_memory_usage():.1f} MB")
-    print(f"   • Device: {trainer.device}")
 
-def compare_with_baselines():
-    """Compare results with previous baselines."""
-    print("\n📈 Performance Comparison")
-    print("=" * 50)
-    print("Previous Results:")
-    print("   🔸 Original (batch training): 10% accuracy")
-    print("   🔸 Single-sample (50 nodes): 18% accuracy")
-    print("   🔸 Specialized (50 nodes): 18% accuracy")
-    print("   🔸 1000-node PCA system: ~20% accuracy")
-    print("\nModular System Improvements:")
-    print("   🔸 High-resolution (64×1024): 16x more capacity")
-    print("   🔸 Linear projection: Learnable input features")
-    print("   🔸 Orthogonal encodings: Reduced class confusion")
-    print("   🔸 Gradient accumulation: Stable learning")
-    print("   🔸 CCE loss: Proper classification objective")
+def setup_production_monitoring(device='cuda'):
+    """Setup production monitoring if available."""
+    profiler = None
+    performance_monitor = None
+    
+    try:
+        from utils.gpu_profiler import create_cuda_profiler, create_performance_monitor
+        profiler = create_cuda_profiler(device=device)
+        performance_monitor = create_performance_monitor(profiler)
+        performance_monitor.start_monitoring()
+        print("🔍 Production monitoring enabled")
+        return profiler, performance_monitor
+    except ImportError:
+        print("⚠️  Production monitoring not available (missing gpu_profiler)")
+        return None, None
+
+
+def run_benchmark_mode(config_path, evaluation_samples):
+    """Run comprehensive benchmark mode."""
+    print(f"\n⚡ Benchmark Mode")
+    print("-" * 30)
+    
+    try:
+        from test_batch_evaluation_performance import BatchEvaluationPerformanceTest
+        
+        benchmark_test = BatchEvaluationPerformanceTest(config_path)
+        benchmark_results = benchmark_test.run_comprehensive_test()
+        
+        # Save benchmark results
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        results_file = f"logs/benchmark_{timestamp}.json"
+        os.makedirs("logs", exist_ok=True)
+        
+        with open(results_file, 'w') as f:
+            json.dump(benchmark_results, f, indent=2, default=str)
+        
+        print(f"\n💾 Benchmark results saved to: {results_file}")
+        return benchmark_results
+        
+    except ImportError:
+        print("❌ Benchmark mode not available (missing test_batch_evaluation_performance)")
+        return None
+
+
+def run_evaluate_mode(trainer, evaluation_samples, production_mode):
+    """Run evaluation-only mode."""
+    print(f"\n📊 Evaluation Mode ({evaluation_samples} samples)")
+    print("-" * 30)
+    
+    if production_mode:
+        try:
+            from core.batch_evaluation_engine import create_batch_evaluation_engine
+            device = 'cuda' if torch.cuda.is_available() else 'cpu'
+            
+            # Create batch evaluator
+            batch_evaluator = create_batch_evaluation_engine(
+                trainer, batch_size=16, device=device, verbose=True
+            )
+            
+            # Run evaluation
+            eval_results = batch_evaluator.evaluate_accuracy_batched(
+                num_samples=evaluation_samples, streaming=True
+            )
+            
+            print(f"\n✅ Production Evaluation Results:")
+            print(f"   🎯 Accuracy: {eval_results['accuracy']:.1%}")
+            print(f"   ⚡ Speed: {eval_results['samples_per_second']:.1f} samples/s")
+            print(f"   🗄️  Cache Hit Rate: {eval_results['cache_hit_rate']:.1%}")
+            
+            return eval_results['accuracy']
+            
+        except ImportError:
+            print("⚠️  Batch evaluation not available, using standard evaluation")
+    
+    # Standard evaluation
+    return evaluate_model(trainer, num_samples=evaluation_samples)
+
 
 def main():
     """Main execution function."""
-    print("🚀 Modular NeuroGraph Training System")
-    print("=" * 60)
-    print(f"⏰ Started at: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-    print()
-    
     # Parse arguments
-    parser = argparse.ArgumentParser(description='Modular NeuroGraph Training')
-    parser.add_argument('--config', type=str, default='config/modular_neurograph.yaml',
-                       help='Configuration file path')
+    parser = argparse.ArgumentParser(description='NeuroGraph Unified Training System')
+    
+    # Configuration
+    parser.add_argument('--config', type=str, 
+                       help='Configuration file path (auto-detected if not specified)')
+    
+    # Modes
+    parser.add_argument('--mode', type=str, 
+                       choices=['train', 'evaluate', 'benchmark'], 
+                       default='train', help='Operation mode')
+    parser.add_argument('--production', action='store_true',
+                       help='Enable production features (GPU profiling, batch optimization)')
+    
+    # Training options
+    parser.add_argument('--epochs', type=int, 
+                       help='Number of training epochs (overrides config)')
+    parser.add_argument('--quick', action='store_true', 
+                       help='Quick test mode (reduced epochs)')
+    parser.add_argument('--eval-only', action='store_true', 
+                       help='Evaluation only mode (deprecated: use --mode evaluate)')
+    
+    # Evaluation options
+    parser.add_argument('--eval-samples', type=int, default=1000,
+                       help='Number of samples for evaluation')
+    
+    # Other options
     parser.add_argument('--seed', type=int, default=42, help='Random seed')
-    parser.add_argument('--quick', action='store_true', help='Quick test mode (5 epochs)')
-    parser.add_argument('--eval-only', action='store_true', help='Evaluation only mode')
     parser.add_argument('--checkpoint', type=str, help='Checkpoint to load')
+    parser.add_argument('--no-plot', action='store_true', 
+                       help='Disable training curve plotting')
+    parser.add_argument('--benchmark', action='store_true',
+                       help='Enable performance benchmarking (deprecated: use --mode benchmark)')
     
     args = parser.parse_args()
     
+    # Handle deprecated arguments
+    if args.eval_only:
+        args.mode = 'evaluate'
+    if args.benchmark:
+        args.mode = 'benchmark'
+    
+    # Display header
+    if args.production:
+        print("🚀 NeuroGraph Production System")
+        print("=" * 50)
+    else:
+        print("NeuroGraph Training System")
+        print(f"Started at: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    
+    # GPU information
+    device = 'cuda' if torch.cuda.is_available() else 'cpu'
+    if torch.cuda.is_available() and args.production:
+        gpu_name = torch.cuda.get_device_name()
+        print(f"✅ GPU: {gpu_name}")
+        print(f"   💾 Memory: {torch.cuda.get_device_properties(0).total_memory / (1024**3):.1f} GB")
+    elif torch.cuda.is_available():
+        print(f"GPU available: {torch.cuda.get_device_name()}")
+    else:
+        print("⚠️  Running on CPU (GPU recommended for optimal performance)")
+    
     # Set seeds for reproducibility
     set_seeds(args.seed)
-    print(f"🎲 Random seed set: {args.seed}")
+    print(f"Random seed: {args.seed}")
+    
+    # Determine configuration file
+    try:
+        config_path = determine_config_file(args)
+        print(f"Using configuration: {config_path}")
+    except FileNotFoundError as e:
+        print(f"❌ {e}")
+        return None
+    
+    # Setup production monitoring if enabled
+    profiler = None
+    performance_monitor = None
+    if args.production:
+        profiler, performance_monitor = setup_production_monitoring(device)
     
     try:
         # Initialize training context
-        print(f"\n🔧 Initializing Modular Training Context...")
-        trainer = create_modular_train_context(args.config)
+        print("🔧 Initializing training context..." if args.production else "Initializing training context...")
+        trainer = create_modular_train_context(config_path)
         
         # Load checkpoint if specified
         if args.checkpoint:
             trainer.load_checkpoint(args.checkpoint)
+            print(f"Loaded checkpoint: {args.checkpoint}")
         
-        # Quick test mode
-        if args.quick:
-            print(f"\n🧪 Quick Test Mode (5 epochs)")
-            trainer.num_epochs = 5
-            trainer.warmup_epochs = 2
+        # Handle different modes
+        if args.mode == 'benchmark':
+            return run_benchmark_mode(config_path, args.eval_samples)
         
-        # Show baseline comparison
-        compare_with_baselines()
+        elif args.mode == 'evaluate':
+            return run_evaluate_mode(trainer, args.eval_samples, args.production)
         
-        # Evaluation only mode
-        if args.eval_only:
-            print(f"\n📊 Evaluation Only Mode")
-            final_accuracy = comprehensive_evaluation(trainer, num_samples=500)
-            analyze_system_performance(trainer)
+        else:  # train mode
+            # Override epochs if specified
+            if args.epochs is not None:
+                trainer.num_epochs = args.epochs
+                print(f"📊 Epochs: {args.epochs} (overridden)" if args.production else f"Epochs overridden: {args.epochs}")
             
-            print(f"\n🎯 Final Accuracy: {final_accuracy:.1%}")
+            # Quick test mode
+            if args.quick:
+                quick_epochs = trainer.config.get('training.quick_mode.epochs', 5)
+                quick_warmup = trainer.config.get('training.quick_mode.warmup_epochs', 2)
+                print(f"⚡ Quick mode: {quick_epochs} epochs" if args.production else f"Quick test mode: {quick_epochs} epochs")
+                trainer.num_epochs = quick_epochs
+                trainer.warmup_epochs = quick_warmup
+            
+            # Training
+            print(f"\n🎯 Starting Training ({trainer.num_epochs} epochs)" if args.production else f"Starting training ({trainer.num_epochs} epochs)...")
+            if args.production:
+                print("-" * 30)
+            
+            start_time = datetime.now()
+            losses = trainer.train()
+            training_time = (datetime.now() - start_time).total_seconds()
+            
+            print(f"\n✅ Training completed in {training_time:.1f}s" if args.production else f"Training completed in {training_time:.1f} seconds")
+            if args.production:
+                print(f"   📉 Final loss: {losses[-1]:.4f}")
+            
+            # Plot training curves (unless disabled)
+            if not args.no_plot:
+                try:
+                    plot_training_curves(losses, getattr(trainer, 'validation_accuracies', None), config=trainer.config)
+                except Exception as e:
+                    print(f"Warning: Could not save training curves: {e}")
+            
+            # Final evaluation
+            print(f"\n📊 Final Evaluation ({args.eval_samples} samples)" if args.production else "")
+            eval_start = datetime.now()
+            final_accuracy = evaluate_model(trainer, num_samples=args.eval_samples, use_batch_evaluation=args.production)
+            eval_time = (datetime.now() - eval_start).total_seconds()
+            
+            if args.production:
+                print(f"   🎯 Final Accuracy: {final_accuracy:.1%}")
+                print(f"   ⚡ Evaluation Speed: {args.eval_samples/eval_time:.1f} samples/s")
+            
+            # Results summary (detailed for non-production mode)
+            if not args.production:
+                print("\nFinal Results:")
+                config = trainer.config
+                print(f"Architecture: {config.get('architecture.total_nodes')} nodes, "
+                      f"{config.get('resolution.phase_bins')}x{config.get('resolution.mag_bins')} resolution")
+                print(f"Parameters: {trainer.count_parameters():,}")
+                print(f"Final accuracy: {final_accuracy:.1%}")
+                print(f"Training epochs: {len(losses)}")
+                print(f"Final loss: {losses[-1]:.4f}")
+                
+                if len(losses) > 1:
+                    improvement = losses[0] - losses[-1]
+                    print(f"Loss improvement: {improvement:+.4f}")
+            
+            # Save checkpoint
+            checkpoint_dir = trainer.config.get('paths.checkpoint_path', 'checkpoints/')
+            timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+            checkpoint_name = f"production_model_{timestamp}.pt" if args.production else f"model_{timestamp}.pt"
+            checkpoint_path = f"{checkpoint_dir}{checkpoint_name}"
+            os.makedirs(checkpoint_dir, exist_ok=True)
+            trainer.save_checkpoint(checkpoint_path)
+            print(f"💾 Checkpoint saved: {checkpoint_path}" if args.production else f"Checkpoint saved: {checkpoint_path}")
+            
+            print(f"\n🎯 NeuroGraph run completed!" if args.production else f"Completed at: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+            
             return final_accuracy
         
-        # Training
-        print(f"\n🎯 Starting Training ({trainer.num_epochs} epochs)")
-        print("=" * 60)
-        
-        start_time = datetime.now()
-        losses = trainer.train()
-        end_time = datetime.now()
-        
-        training_duration = (end_time - start_time).total_seconds()
-        print(f"\n⏱️  Training completed in {training_duration:.1f} seconds")
-        
-        # Plot training curves
-        plot_training_curves(losses, trainer.validation_accuracies)
-        
-        # Comprehensive evaluation
-        final_accuracy = comprehensive_evaluation(trainer, num_samples=500)
-        
-        # System performance analysis
-        analyze_system_performance(trainer)
-        
-        # Results summary
-        print("\n🎉 FINAL RESULTS")
-        print("=" * 60)
-        
-        # Architecture summary
-        config = trainer.config
-        print(f"📊 Architecture:")
-        print(f"   • Total nodes: {config.get('architecture.total_nodes')}")
-        print(f"   • Input nodes: {config.get('architecture.input_nodes')} (vs 5 baseline)")
-        print(f"   • Resolution: {config.get('resolution.phase_bins')}×{config.get('resolution.mag_bins')} (vs 8×256)")
-        print(f"   • Resolution increase: {config.get('resolution.resolution_increase')}x")
-        print(f"   • Parameters: {trainer.count_parameters():,}")
-        
-        # Performance summary
-        print(f"\n🎯 Performance:")
-        print(f"   • Final accuracy: {final_accuracy:.1%}")
-        print(f"   • Training epochs: {len(losses)}")
-        print(f"   • Final loss: {losses[-1]:.4f}")
-        if len(losses) > 1:
-            print(f"   • Loss improvement: {losses[0] - losses[-1]:+.4f}")
-        
-        # Comparison with baselines
-        print(f"\n📈 Improvements vs Baselines:")
-        baseline_10 = 0.10
-        baseline_18 = 0.18
-        baseline_20 = 0.20
-        
-        improvement_vs_10 = (final_accuracy - baseline_10) / baseline_10 * 100
-        improvement_vs_18 = (final_accuracy - baseline_18) / baseline_18 * 100
-        improvement_vs_20 = (final_accuracy - baseline_20) / baseline_20 * 100
-        
-        print(f"   • vs 10% baseline: {improvement_vs_10:+.1f}% relative improvement")
-        print(f"   • vs 18% baseline: {improvement_vs_18:+.1f}% relative improvement")
-        print(f"   • vs 20% baseline: {improvement_vs_20:+.1f}% relative improvement")
-        
-        # Success criteria
-        print(f"\n✅ Success Criteria:")
-        success_thresholds = [0.25, 0.30, 0.40, 0.50]
-        
-        for threshold in success_thresholds:
-            if final_accuracy >= threshold:
-                print(f"   🎉 ACHIEVED: {final_accuracy:.1%} ≥ {threshold:.1%} target!")
-                if threshold >= 0.40:
-                    print(f"   🚀 Excellent performance - ready for advanced applications!")
-                elif threshold >= 0.30:
-                    print(f"   🎯 Good performance - significant improvement over baselines!")
-                else:
-                    print(f"   📈 Moderate improvement - system shows promise!")
-                break
-        else:
-            print(f"   📊 Current: {final_accuracy:.1%} (next target: {success_thresholds[0]:.1%})")
-            print(f"   🔧 Consider further optimization or architectural changes")
-        
-        # Save checkpoint
-        checkpoint_path = f"checkpoints/modular/final_checkpoint_{datetime.now().strftime('%Y%m%d_%H%M%S')}.pt"
-        trainer.save_checkpoint(checkpoint_path)
-        
-        print(f"\n⏰ Completed at: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-        
-        return final_accuracy
-        
+    except KeyboardInterrupt:
+        print(f"\n⏹️  Training interrupted by user" if args.production else "\nTraining interrupted by user")
+        return None
     except Exception as e:
-        print(f"\n❌ Error during execution: {e}")
+        print(f"\n❌ Error: {e}" if args.production else f"Error during execution: {e}")
         import traceback
         traceback.print_exc()
         return None
-
-def quick_test():
-    """Quick test with reduced parameters for development."""
-    print("🧪 Quick Test Mode (5 epochs)")
-    print("=" * 40)
     
-    try:
-        # Create trainer with quick test config
-        trainer = create_modular_train_context()
+    finally:
+        # Stop monitoring if enabled
+        if performance_monitor:
+            performance_monitor.stop_monitoring()
+            performance_monitor.print_performance_report()
         
-        # Override config for quick test
-        trainer.num_epochs = 5
-        trainer.warmup_epochs = 2
-        
-        # Quick training
-        losses = trainer.train()
-        accuracy = trainer.evaluate_accuracy(num_samples=50)
-        
-        print(f"\n📋 Quick Test Results:")
-        print(f"   ✅ Training: {len(losses)} epochs completed")
-        print(f"   📊 Final loss: {losses[-1]:.4f}")
-        print(f"   🎯 Accuracy: {accuracy:.1%}")
-        print(f"   🚀 System ready for full training!")
-        
-        return accuracy
-        
-    except Exception as e:
-        print(f"❌ Quick test failed: {e}")
-        import traceback
-        traceback.print_exc()
-        return None
+        # Print performance statistics
+        if hasattr(trainer, 'print_performance_report'):
+            trainer.print_performance_report()
 
-def benchmark_components():
-    """Benchmark individual components."""
-    print("⚡ Component Benchmarking")
-    print("=" * 40)
-    
-    try:
-        # Test configuration loading
-        start_time = datetime.now()
-        config = ModularConfig()
-        config_time = (datetime.now() - start_time).total_seconds()
-        print(f"   📋 Config loading: {config_time:.3f}s")
-        
-        # Test lookup table initialization
-        from core.high_res_tables import HighResolutionLookupTables
-        start_time = datetime.now()
-        lookup = HighResolutionLookupTables(64, 1024)
-        lookup_time = (datetime.now() - start_time).total_seconds()
-        print(f"   📊 Lookup tables: {lookup_time:.3f}s")
-        
-        # Test input adapter
-        from modules.linear_input_adapter import LinearInputAdapter
-        start_time = datetime.now()
-        adapter = LinearInputAdapter(784, 200, 5, 64, 1024)
-        adapter_time = (datetime.now() - start_time).total_seconds()
-        print(f"   🔧 Input adapter: {adapter_time:.3f}s")
-        
-        # Test class encoder
-        from modules.orthogonal_encodings import OrthogonalClassEncoder
-        start_time = datetime.now()
-        encoder = OrthogonalClassEncoder(10, 5, 64, 1024)
-        encoder_time = (datetime.now() - start_time).total_seconds()
-        print(f"   🎯 Class encoder: {encoder_time:.3f}s")
-        
-        print(f"   ✅ All components initialized successfully!")
-        
-    except Exception as e:
-        print(f"❌ Benchmark failed: {e}")
 
 if __name__ == "__main__":
-    # Check for special modes
-    if len(sys.argv) > 1:
-        if sys.argv[1] == "--benchmark":
-            benchmark_components()
-            exit(0)
-        elif sys.argv[1] == "--quick-test":
-            accuracy = quick_test()
-            exit(0 if accuracy is not None else 1)
-    
     # Run main training
-    accuracy = main()
+    result = main()
     
     # Exit with appropriate code
-    if accuracy is not None:
-        print(f"\n🎯 Final accuracy: {accuracy:.1%}")
+    if result is not None:
+        print(f"Final result: {result:.1%}" if isinstance(result, float) else f"Completed successfully")
         exit(0)
     else:
-        print(f"\n❌ Training failed")
+        print("Execution failed")
         exit(1)

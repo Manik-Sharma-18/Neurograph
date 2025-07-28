@@ -33,6 +33,7 @@ class ModularForwardEngine:
         max_timesteps: int = 35,
         top_k_neighbors: int = 4,
         use_radiation: bool = True,
+        radiation_batch_size: int = 64,
         min_output_activation_timesteps: int = 2,
         device: str = 'cpu',
         verbose: bool = False
@@ -59,6 +60,7 @@ class ModularForwardEngine:
         self.max_timesteps = max_timesteps
         self.top_k_neighbors = top_k_neighbors
         self.use_radiation = use_radiation
+        self.radiation_batch_size = radiation_batch_size
         self.min_output_activation_timesteps = min_output_activation_timesteps
         self.device = device
         self.verbose = verbose
@@ -137,6 +139,7 @@ class ModularForwardEngine:
                 lookup_table=self.phase_cell.lookup if hasattr(self.phase_cell, 'lookup') else None,
                 use_radiation=self.use_radiation,
                 top_k_neighbors=self.top_k_neighbors,
+                radiation_batch_size=self.radiation_batch_size,
                 device=self.device
             )
             
@@ -194,6 +197,7 @@ def create_modular_forward_engine(
         max_timesteps=config.get('forward_pass', {}).get('max_timesteps', 35),
         top_k_neighbors=config.get('graph_structure', {}).get('top_k_neighbors', 4),
         use_radiation=config.get('graph_structure', {}).get('use_radiation', True),
+        radiation_batch_size=config.get('radiation', {}).get('batch_size', 64),
         min_output_activation_timesteps=config.get('forward_pass', {}).get('min_output_activation_timesteps', 2),
         device=device,
         verbose=config.get('forward_pass', {}).get('verbose', False)

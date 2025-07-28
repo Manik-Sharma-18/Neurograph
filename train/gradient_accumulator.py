@@ -22,20 +22,28 @@ class GradientAccumulator:
     """
     
     def __init__(self, accumulation_steps: int = 8, lr_scaling: str = "sqrt", 
-                 buffer_size: int = 1000, device: str = 'cpu'):
+                 buffer_size: int = 1500, device: str = 'auto'):  # Increased buffer size
         """
         Initialize gradient accumulator.
         
         Args:
             accumulation_steps: Number of samples to accumulate (default: 8)
             lr_scaling: Learning rate scaling method ("sqrt", "linear", "none")
-            buffer_size: Maximum number of nodes to buffer
-            device: Computation device
+            buffer_size: Maximum number of nodes to buffer (increased to 1500)
+            device: Computation device ('cpu', 'cuda', or 'auto')
         """
         self.accumulation_steps = accumulation_steps
         self.lr_scaling = lr_scaling
         self.buffer_size = buffer_size
-        self.device = device
+        
+        # Device management
+        if device == 'auto':
+            from utils.device_manager import get_device_manager
+            self.device_manager = get_device_manager()
+            self.device = self.device_manager.device
+        else:
+            self.device_manager = None
+            self.device = torch.device(device)
         
         # Gradient buffers: node_id -> {'phase': [gradients], 'mag': [gradients], 'count': int}
         self.gradient_buffer = defaultdict(lambda: {

@@ -11,7 +11,7 @@ architecture:
   input_nodes: 200
   output_nodes: 10
   intermediate_nodes: 790
-  vector_dim: 5
+  vector_dim: 8
   seed: 42
 
 resolution:
@@ -24,6 +24,10 @@ graph_structure:
   top_k_neighbors: 6
   use_radiation: true
 
+radiation:
+  batch_size: 64
+  cache_enabled: true
+
 input_processing:
   adapter_type: "linear_projection"
   input_dim: 784
@@ -34,7 +38,7 @@ input_processing:
 class_encoding:
   type: "orthogonal"
   num_classes: 10
-  encoding_dim: 5
+  encoding_dim: 8
   orthogonality_threshold: 0.1
 
 loss_function:
@@ -55,6 +59,10 @@ training:
     warmup_epochs: 10     # Balanced for production training
     num_epochs: 30        # Production training epochs
     batch_size: 5
+  
+  quick_mode:
+    epochs: 5
+    warmup_epochs: 2
 
 forward_pass:
   max_timesteps: 35
@@ -78,6 +86,7 @@ paths:
   graph_path: "config/modular_static_graph.pkl"
   log_path: "logs/modular/"
   checkpoint_path: "checkpoints/modular/"
+  training_curves_path: "logs/modular/training_curves.png"
 
 fallback:
   enable_legacy_mode: true
@@ -89,3 +98,4 @@ debugging:
   save_intermediate_states: false
   plot_training_curves: true
   evaluation_samples: 300
+  final_evaluation_samples: 500

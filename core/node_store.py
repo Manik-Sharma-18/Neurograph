@@ -51,3 +51,23 @@ class NodeStore(nn.Module):
 
     def is_output(self, node_id):
         return node_id in self.output_nodes
+    
+    def get_state(self):
+        """Get the current state for checkpointing."""
+        return {
+            'phase_table': {k: v.clone() for k, v in self.phase_table.items()},
+            'mag_table': {k: v.clone() for k, v in self.mag_table.items()},
+            'node_ids': self.node_ids,
+            'input_nodes': self.input_nodes,
+            'output_nodes': self.output_nodes,
+            'connections': self.connections
+        }
+    
+    def load_state(self, state):
+        """Load state from checkpoint."""
+        for k, v in state['phase_table'].items():
+            if k in self.phase_table:
+                self.phase_table[k].data = v
+        for k, v in state['mag_table'].items():
+            if k in self.mag_table:
+                self.mag_table[k].data = v

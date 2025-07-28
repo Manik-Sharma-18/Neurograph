@@ -8,8 +8,8 @@ A biologically-inspired, graph-based neural network implementation using discret
 # Run the main system
 python main.py
 
-# Run training
-python train.py
+# Run production training
+python main_production.py
 
 # Quick test (5 epochs)
 python main.py --quick
@@ -79,10 +79,10 @@ training:
 ```
 Neurograph/
 ├── main.py                 # Primary entry point
-├── train.py                # Training script
+├── main_production.py      # Production training script
 ├── README.md               # This file
 ├── config/
-│   └── neurograph.yaml     # Primary configuration
+│   └── production.yaml     # Production configuration
 ├── core/                   # Core neural components
 │   ├── radiation.py        # Dynamic neighbor selection
 │   ├── graph.py           # Graph structure
@@ -97,6 +97,7 @@ Neurograph/
 ├── utils/                  # Utilities
 ├── cache/                  # Encoding caches
 ├── logs/                   # Training logs
+├── memory-bank/           # Project documentation
 └── archive/               # Historical files
 ```
 

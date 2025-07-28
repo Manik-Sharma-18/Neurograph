@@ -1,6 +1,7 @@
 """
 High-Resolution Lookup Tables for Modular NeuroGraph
 Supports 64 phase bins and 1024 magnitude bins (16x resolution increase)
+Optimized with JIT compilation for critical operations
 """
 
 import torch
@@ -8,6 +9,19 @@ import torch.nn as nn
 import numpy as np
 import math
 from typing import Tuple, Optional
+
+# JIT compilation flag - can be disabled for debugging
+ENABLE_JIT = True
+
+def jit_compile_if_enabled(func):
+    """Decorator to conditionally apply JIT compilation."""
+    if ENABLE_JIT:
+        try:
+            return torch.jit.script(func)
+        except Exception as e:
+            print(f"Warning: JIT compilation failed for {func.__name__}: {e}")
+            return func
+    return func
 
 class HighResolutionLookupTables(nn.Module):
     """
@@ -168,10 +182,12 @@ class HighResolutionLookupTables(nn.Module):
         else:
             return self.mag_grad_table[mag_indices] * self.mag_grad_scale
     
+    @jit_compile_if_enabled
     def get_signal_vector(self, phase_indices: torch.Tensor, mag_indices: torch.Tensor, 
                          use_sigmoid: bool = False) -> torch.Tensor:
         """
         Compute signal vector from phase and magnitude indices.
+        [JIT OPTIMIZED - Critical path method]
         
         Args:
             phase_indices: LongTensor of shape [D] with phase indices
@@ -243,10 +259,12 @@ class HighResolutionLookupTables(nn.Module):
             'mag_resolution': 6.0 / self.M
         }
     
+    @jit_compile_if_enabled
     def compute_signal_gradients(self, phase_indices: torch.Tensor, mag_indices: torch.Tensor, 
                                upstream_grad: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
         """
         Compute gradients using continuous function derivatives with chain rule.
+        [JIT OPTIMIZED - Critical gradient computation method]
         
         This is the core method for continuous gradient approximation:
         - Uses exact derivatives of cos(x), sin(x), exp(x)

@@ -1,29 +1,51 @@
 """
 Modular Training Context for NeuroGraph
-Integrates all modular components with gradient accumulation
+Optimized training system with vectorized operations and performance monitoring
 """
 
 import torch
-import torch.nn as nn
 import numpy as np
 import os
+import time
 from typing import Dict, List, Tuple, Optional
 from datetime import datetime
+from functools import wraps
 
 # Import modular components
 from utils.modular_config import ModularConfig
 from core.high_res_tables import HighResolutionLookupTables
-from core.modular_cell import ModularPhaseCell, create_phase_cell
-from modules.linear_input_adapter import LinearInputAdapter, create_input_adapter
-from modules.orthogonal_encodings import OrthogonalClassEncoder, create_class_encoder
-from modules.classification_loss import ClassificationLoss, create_classification_loss
-from train.gradient_accumulator import GradientAccumulator, BatchController, create_gradient_accumulator
+from core.modular_cell import create_phase_cell
+from modules.linear_input_adapter import create_input_adapter
+from modules.orthogonal_encodings import create_class_encoder
+from modules.classification_loss import create_classification_loss
+from train.gradient_accumulator import create_gradient_accumulator, BatchController
 
-# Import legacy components for fallback
+# Import core components
 from core.node_store import NodeStore
-from core.modular_forward_engine import ModularForwardEngine, create_modular_forward_engine
+from core.modular_forward_engine import create_modular_forward_engine
 from core.activation_table import ActivationTable
 from core.graph import build_static_graph
+
+# Performance monitoring decorator
+def timing_decorator(func_name: str):
+    """Decorator for timing critical methods."""
+    def decorator(func):
+        @wraps(func)
+        def wrapper(self, *args, **kwargs):
+            if not hasattr(self, '_timing_stats'):
+                self._timing_stats = {}
+            
+            start_time = time.perf_counter()
+            result = func(self, *args, **kwargs)
+            elapsed = time.perf_counter() - start_time
+            
+            if func_name not in self._timing_stats:
+                self._timing_stats[func_name] = []
+            self._timing_stats[func_name].append(elapsed)
+            
+            return result
+        return wrapper
+    return decorator
 
 class ModularTrainContext:
     """
@@ -293,34 +315,29 @@ class ModularTrainContext:
         
         return output_signals
     
-    def compute_loss(self, output_signals: Dict[int, torch.Tensor], target_label: int) -> torch.Tensor:
+    @timing_decorator("compute_loss")
+    def compute_loss(self, output_signals: Dict[int, torch.Tensor], target_label: int) -> Tuple[torch.Tensor, torch.Tensor]:
         """
-        Compute loss from output signals.
+        Compute categorical cross-entropy loss from output signals.
         
         Args:
             output_signals: Output node signals
             target_label: Ground truth label
             
         Returns:
-            Loss tensor
+            Tuple of (loss, logits)
         """
-        if self.config.get('loss_function.type') == "categorical_crossentropy":
-            # Compute logits using cosine similarity
-            class_encodings = self.class_encoder.get_all_encodings()
-            logits = self.loss_function.compute_logits_from_signals(
-                output_signals, class_encodings, self.lookup_tables
-            )
-            
-            # Compute cross-entropy loss
-            target_tensor = torch.tensor(target_label, device=self.device)
-            loss = self.loss_function(logits, target_tensor)
-            
-            return loss, logits
-        else:
-            # Legacy MSE loss
-            target_encoding = self.class_encoder.get_class_encoding(target_label)
-            # Implementation would depend on legacy system
-            raise NotImplementedError("Legacy MSE loss not implemented in modular system")
+        # Compute logits using cosine similarity
+        class_encodings = self.class_encoder.get_all_encodings()
+        logits = self.loss_function.compute_logits_from_signals(
+            output_signals, class_encodings, self.lookup_tables
+        )
+        
+        # Compute cross-entropy loss
+        target_tensor = torch.tensor(target_label, device=self.device)
+        loss = self.loss_function(logits, target_tensor)
+        
+        return loss, logits
     
     def backward_pass(self, loss: torch.Tensor, output_signals: Dict[int, torch.Tensor]) -> Dict[int, Tuple[torch.Tensor, torch.Tensor]]:
         """
@@ -370,10 +387,10 @@ class ModularTrainContext:
     
     def compute_upstream_gradients(self, output_signals: Dict[int, torch.Tensor]) -> Dict[int, torch.Tensor]:
         """
-        Compute gradients of loss function w.r.t. output signals.
+        Compute gradients of categorical cross-entropy loss w.r.t. output signals.
         
-        This replaces the failing loss.backward() call with manual gradient computation
-        based on the loss function type (categorical cross-entropy or MSE).
+        The gradient of cross-entropy w.r.t. logits is: (softmax_probs - one_hot_target)
+        We backpropagate this through the cosine similarity computation.
         
         Args:
             output_signals: Output node signals
@@ -383,32 +400,9 @@ class ModularTrainContext:
         """
         upstream_gradients = {}
         
-        if self.config.get('loss_function.type') == "categorical_crossentropy":
-            # For categorical cross-entropy, we need to compute gradients w.r.t. logits
-            upstream_gradients = self.compute_crossentropy_gradients(output_signals)
-        else:
-            # For MSE loss (legacy), compute gradients w.r.t. signal vectors
-            upstream_gradients = self.compute_mse_gradients(output_signals)
-        
-        return upstream_gradients
-    
-    def compute_crossentropy_gradients(self, output_signals: Dict[int, torch.Tensor]) -> Dict[int, torch.Tensor]:
-        """
-        Compute gradients for categorical cross-entropy loss.
-        
-        The gradient of cross-entropy w.r.t. logits is: (softmax_probs - one_hot_target)
-        We need to backpropagate this through the cosine similarity computation.
-        
-        Args:
-            output_signals: Output node signals
-            
-        Returns:
-            Gradients w.r.t. output signals
-        """
-        upstream_gradients = {}
-        
         # Get class encodings for cosine similarity computation
         class_encodings = self.class_encoder.get_all_encodings()
+        num_classes = self.config.get('class_encoding.num_classes')
         
         # For each output node, compute gradient contribution
         for node_id, signal in output_signals.items():
@@ -416,7 +410,7 @@ class ModularTrainContext:
             signal_grad = torch.zeros_like(signal)
             
             # Compute gradient contribution from each class
-            for class_id in range(self.config.get('class_encoding.num_classes')):
+            for class_id in range(num_classes):
                 if class_id in class_encodings:
                     # Get class encoding signal
                     phase_idx, mag_idx = class_encodings[class_id]
@@ -432,32 +426,9 @@ class ModularTrainContext:
                                  signal * dot_product / (signal_norm**3 * class_norm))
                     
                     # Weight by softmax gradient (simplified - assumes uniform weighting)
-                    signal_grad += cosine_grad / self.config.get('class_encoding.num_classes')
+                    signal_grad += cosine_grad / num_classes
             
             upstream_gradients[node_id] = signal_grad
-        
-        return upstream_gradients
-    
-    def compute_mse_gradients(self, output_signals: Dict[int, torch.Tensor]) -> Dict[int, torch.Tensor]:
-        """
-        Compute gradients for MSE loss (legacy support).
-        
-        Args:
-            output_signals: Output node signals
-            
-        Returns:
-            Gradients w.r.t. output signals
-        """
-        upstream_gradients = {}
-        
-        # For MSE, we need target signals (this is a simplified version)
-        for node_id, signal in output_signals.items():
-            # Create dummy target (in real implementation, this would come from class encodings)
-            target_signal = torch.zeros_like(signal)  # Placeholder
-            
-            # MSE gradient: 2 * (predicted - target)
-            mse_grad = 2.0 * (signal - target_signal)
-            upstream_gradients[node_id] = mse_grad
         
         return upstream_gradients
     
@@ -523,6 +494,45 @@ class ModularTrainContext:
         # Backward pass
         node_gradients = self.backward_pass(loss, output_signals)
         
+        # === [OPTIMIZED VECTORIZED BLOCK] ===
+        # Vectorized intermediate node credit assignment using cosine alignment loss
+        active_nodes = self.activation_table.get_active_nodes_at_last_timestep()
+        
+        if active_nodes:  # Only process if there are active nodes
+            # Pre-compute and cache target vector (avoid repeated computation)
+            if not hasattr(self, '_cached_target_vectors'):
+                self._cached_target_vectors = {}
+            
+            if target_label not in self._cached_target_vectors:
+                target_phase_idx, target_mag_idx = self.class_encoder.get_class_encoding(target_label)
+                target_vector = self.lookup_tables.get_signal_vector(target_phase_idx, target_mag_idx)
+                self._cached_target_vectors[target_label] = target_vector
+            else:
+                target_vector = self._cached_target_vectors[target_label]
+            
+            # Vectorized processing of all active nodes
+            valid_nodes, node_signals, phase_indices, mag_indices = self._batch_get_node_signals(active_nodes)
+            
+            if len(valid_nodes) > 0:
+                # Vectorized cosine similarity computation [N]
+                cos_sims = torch.nn.functional.cosine_similarity(
+                    node_signals, target_vector.unsqueeze(0).expand(len(valid_nodes), -1), dim=1
+                )
+                
+                # Vectorized gradient computation [N, D]
+                grad_signals = self._compute_vectorized_cosine_gradients(
+                    node_signals, target_vector, cos_sims
+                )
+                
+                # Vectorized discrete gradient computation [N, D] each
+                phase_grads, mag_grads = self._compute_vectorized_discrete_gradients(
+                    phase_indices, mag_indices, grad_signals
+                )
+                
+                # Batch gradient accumulation
+                if self.gradient_accumulator is not None:
+                    self._batch_accumulate_gradients(valid_nodes, phase_grads, mag_grads)
+        
         # Handle gradient accumulation
         if self.gradient_accumulator is not None:
             # Accumulate gradients
@@ -541,6 +551,120 @@ class ModularTrainContext:
             self.apply_direct_updates(node_gradients)
         
         return loss.item(), accuracy
+    
+    def _batch_get_node_signals(self, active_nodes: List) -> Tuple[List, torch.Tensor, torch.Tensor, torch.Tensor]:
+        """
+        Vectorized batch retrieval of node signals and indices.
+        
+        Args:
+            active_nodes: List of active node IDs
+            
+        Returns:
+            Tuple of (valid_nodes, node_signals, phase_indices, mag_indices)
+        """
+        valid_nodes = []
+        phase_indices_list = []
+        mag_indices_list = []
+        
+        for node_id in active_nodes:
+            # Convert node_id to string format for node_store lookup
+            string_node_id = f"n{node_id}" if isinstance(node_id, int) else node_id
+            
+            # Skip if node is not in node_store
+            if string_node_id not in self.node_store.phase_table:
+                continue
+            
+            valid_nodes.append(node_id)
+            phase_indices_list.append(self.node_store.get_phase(string_node_id))
+            mag_indices_list.append(self.node_store.get_mag(string_node_id))
+        
+        if not valid_nodes:
+            return [], torch.empty(0), torch.empty(0), torch.empty(0)
+        
+        # Stack into tensors [N, D]
+        phase_indices = torch.stack(phase_indices_list)
+        mag_indices = torch.stack(mag_indices_list)
+        
+        # Vectorized signal computation [N, D]
+        node_signals = self.lookup_tables.get_signal_vector(phase_indices, mag_indices)
+        
+        return valid_nodes, node_signals, phase_indices, mag_indices
+    
+    def _compute_vectorized_cosine_gradients(self, node_signals: torch.Tensor, 
+                                           target_vector: torch.Tensor, 
+                                           cos_sims: torch.Tensor) -> torch.Tensor:
+        """
+        Vectorized computation of cosine similarity gradients.
+        
+        Args:
+            node_signals: Node signal vectors [N, D]
+            target_vector: Target vector [D]
+            cos_sims: Cosine similarities [N]
+            
+        Returns:
+            Gradient signals [N, D]
+        """
+        # Vectorized norm computation [N] and [1]
+        node_signal_norms = torch.norm(node_signals, p=2, dim=1, keepdim=True) + 1e-8  # [N, 1]
+        target_norm = torch.norm(target_vector, p=2) + 1e-8  # scalar
+        
+        # Expand target vector for broadcasting [1, D] -> [N, D]
+        target_expanded = target_vector.unsqueeze(0).expand(len(node_signals), -1)
+        
+        # Vectorized cosine gradient computation [N, D]
+        # ∇(-cos_sim(u, v)) = -(v/||v|| - u*cos_sim/||u||) / ||u||
+        cos_sims_expanded = cos_sims.unsqueeze(1)  # [N, 1]
+        
+        grad_signals = -(target_expanded / target_norm - 
+                        node_signals * cos_sims_expanded / node_signal_norms) / node_signal_norms
+        
+        return grad_signals
+    
+    def _compute_vectorized_discrete_gradients(self, phase_indices: torch.Tensor,
+                                             mag_indices: torch.Tensor,
+                                             grad_signals: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+        """
+        Vectorized computation of discrete gradients.
+        
+        Args:
+            phase_indices: Phase indices [N, D]
+            mag_indices: Magnitude indices [N, D]
+            grad_signals: Gradient signals [N, D]
+            
+        Returns:
+            Tuple of (phase_gradients, mag_gradients) [N, D] each
+        """
+        # Vectorized discrete gradient computation using lookup tables
+        phase_grads, mag_grads = self.lookup_tables.compute_signal_gradients(
+            phase_indices, mag_indices, grad_signals
+        )
+        
+        return phase_grads, mag_grads
+    
+    def _batch_accumulate_gradients(self, valid_nodes: List, 
+                                  phase_grads: torch.Tensor, 
+                                  mag_grads: torch.Tensor):
+        """
+        Batch accumulation of gradients for multiple nodes.
+        
+        Args:
+            valid_nodes: List of valid node IDs
+            phase_grads: Phase gradients [N, D]
+            mag_grads: Magnitude gradients [N, D]
+        """
+        for i, node_id in enumerate(valid_nodes):
+            # Convert string node_id back to int for gradient accumulator
+            if isinstance(node_id, str) and node_id.startswith('n'):
+                numeric_node_id = int(node_id[1:])
+            else:
+                numeric_node_id = node_id
+            
+            # Accumulate gradients for this node
+            self.gradient_accumulator.accumulate_gradients(
+                node_id=numeric_node_id,
+                phase_grad=phase_grads[i],
+                mag_grad=mag_grads[i]
+            )
     
     def apply_direct_updates(self, node_gradients: Dict[int, Tuple[torch.Tensor, torch.Tensor]]):
         """
@@ -643,16 +767,32 @@ class ModularTrainContext:
         
         return self.training_losses
     
-    def evaluate_accuracy(self, num_samples: int = 100) -> float:
+    def evaluate_accuracy(self, num_samples: int = 100, use_batch_evaluation: bool = True) -> float:
         """
-        Evaluate model accuracy.
+        Evaluate model accuracy with optional batch optimization.
         
         Args:
             num_samples: Number of samples to evaluate
+            use_batch_evaluation: Use optimized batch evaluation engine
             
         Returns:
             Accuracy as float
         """
+        # Use optimized batch evaluation if enabled
+        if use_batch_evaluation and self.config.get('batch_evaluation.enabled', True):
+            if not hasattr(self, '_batch_evaluator'):
+                from core.batch_evaluation_engine import create_batch_evaluation_engine
+                batch_size = self.config.get('batch_evaluation.batch_size', 16)
+                self._batch_evaluator = create_batch_evaluation_engine(
+                    self, batch_size=batch_size, device=self.device, verbose=False
+                )
+            
+            results = self._batch_evaluator.evaluate_accuracy_batched(
+                num_samples=num_samples, streaming=True
+            )
+            return results['accuracy']
+        
+        # Fallback to legacy evaluation
         if hasattr(self.input_adapter, 'eval'):
             self.input_adapter.eval()
         
@@ -754,6 +894,117 @@ class ModularTrainContext:
             self.input_adapter.load_state_dict(checkpoint['input_adapter_state'])
         
         print(f"📂 Checkpoint loaded from {filepath}")
+    
+    def get_performance_stats(self) -> Dict[str, Dict[str, float]]:
+        """
+        Get comprehensive performance statistics.
+        
+        Returns:
+            Dictionary with timing statistics for each monitored method
+        """
+        if not hasattr(self, '_timing_stats'):
+            return {}
+        
+        stats = {}
+        for method_name, timings in self._timing_stats.items():
+            if timings:
+                stats[method_name] = {
+                    'count': len(timings),
+                    'total_time': sum(timings),
+                    'avg_time': np.mean(timings),
+                    'min_time': min(timings),
+                    'max_time': max(timings),
+                    'std_time': np.std(timings) if len(timings) > 1 else 0.0
+                }
+        
+        return stats
+    
+    def print_performance_report(self):
+        """Print detailed performance report."""
+        stats = self.get_performance_stats()
+        
+        if not stats:
+            print("📊 No performance data available")
+            return
+        
+        print("\n📊 Performance Report")
+        print("=" * 60)
+        
+        total_calls = sum(s['count'] for s in stats.values())
+        total_time = sum(s['total_time'] for s in stats.values())
+        
+        print(f"Total method calls: {total_calls:,}")
+        print(f"Total execution time: {total_time:.3f}s")
+        print(f"Average time per call: {total_time/total_calls*1000:.2f}ms")
+        
+        print("\nMethod Breakdown:")
+        print("-" * 60)
+        
+        # Sort by total time (descending)
+        sorted_methods = sorted(stats.items(), key=lambda x: x[1]['total_time'], reverse=True)
+        
+        for method_name, method_stats in sorted_methods:
+            pct_time = (method_stats['total_time'] / total_time) * 100
+            print(f"{method_name:25s} | "
+                  f"Calls: {method_stats['count']:6,} | "
+                  f"Total: {method_stats['total_time']:7.3f}s ({pct_time:5.1f}%) | "
+                  f"Avg: {method_stats['avg_time']*1000:6.2f}ms | "
+                  f"Min: {method_stats['min_time']*1000:6.2f}ms | "
+                  f"Max: {method_stats['max_time']*1000:6.2f}ms")
+    
+    def reset_performance_stats(self):
+        """Reset all performance statistics."""
+        if hasattr(self, '_timing_stats'):
+            self._timing_stats.clear()
+        print("🔄 Performance statistics reset")
+    
+    def get_cache_performance(self) -> Dict[str, any]:
+        """
+        Get cache performance statistics from radiation system.
+        
+        Returns:
+            Dictionary with cache statistics
+        """
+        cache_stats = {}
+        
+        # Get radiation cache stats if available
+        if hasattr(self.forward_engine, 'radiation_system'):
+            radiation_system = self.forward_engine.radiation_system
+            if hasattr(radiation_system, 'get_cache_performance'):
+                cache_stats['radiation_cache'] = radiation_system.get_cache_performance()
+        
+        # Get lookup table cache stats if available
+        if hasattr(self.lookup_tables, 'get_cache_stats'):
+            cache_stats['lookup_tables'] = self.lookup_tables.get_cache_stats()
+        
+        return cache_stats
+    
+    def print_cache_report(self):
+        """Print cache performance report."""
+        cache_stats = self.get_cache_performance()
+        
+        if not cache_stats:
+            print("📊 No cache performance data available")
+            return
+        
+        print("\n🗄️  Cache Performance Report")
+        print("=" * 60)
+        
+        for cache_name, stats in cache_stats.items():
+            print(f"\n{cache_name.upper()}:")
+            print("-" * 30)
+            
+            if isinstance(stats, dict):
+                for key, value in stats.items():
+                    if isinstance(value, float):
+                        if 'rate' in key.lower() or 'ratio' in key.lower():
+                            print(f"  {key:20s}: {value:.1%}")
+                        else:
+                            print(f"  {key:20s}: {value:.3f}")
+                    else:
+                        print(f"  {key:20s}: {value}")
+            else:
+                print(f"  Status: {stats}")
 
 # Factory function
 def create_modular_train_context(config_path: str = "config/modular_neurograph.yaml") -> ModularTrainContext:

@@ -13,6 +13,7 @@ def propagate_step(
     lookup_table,
     use_radiation: bool = True,
     top_k_neighbors: int = 4,
+    radiation_batch_size: int = 64,
     device='cpu'
 ):
     """
@@ -52,7 +53,8 @@ def propagate_step(
                 node_store=node_store,
                 graph_df=graph_df,
                 lookup_table=lookup_table,
-                top_k=top_k_neighbors
+                top_k=top_k_neighbors,
+                batch_size=radiation_batch_size
             )
             all_targets += dynamic_targets
 
