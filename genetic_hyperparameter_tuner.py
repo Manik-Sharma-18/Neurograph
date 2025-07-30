@@ -2,7 +2,7 @@
 Genetic Algorithm Hyperparameter Tuner for NeuroGraph
 Optimizes discrete neural network hyperparameters through evolutionary search
 """
-
+### Flatten and avoiding nesting params
 import os
 import sys
 import yaml
@@ -10,6 +10,7 @@ import json
 import random
 import tempfile
 import shutil
+import hashlib
 from datetime import datetime
 from typing import Dict, List, Tuple, Union, Any
 import logging
@@ -19,6 +20,7 @@ sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
 # NeuroGraph imports
 from train.modular_train_context import create_modular_train_context
+from modules.multi_run_fitness_evaluator import create_multi_run_fitness_evaluator
 
 
 class GeneticHyperparameterTuner:
@@ -29,22 +31,25 @@ class GeneticHyperparameterTuner:
     actual training runs for fitness evaluation.
     """
     
-    def __init__(self, crossover_rate=0.3, mutation_rate=0.2, elite_percentage=0.5):
+    def __init__(self, generations=10, elite_percentage=0.5, crossover_rate=0.3, mutation_rate=0.2):
         """
         Initialize the genetic algorithm tuner.
         
         Args:
+            generations: Number of evolution cycles to run (1 to 100)
+            elite_percentage: Percentage of population that survives to breed (0.0 to 1.0)
             crossover_rate: Probability of crossover between parents (0.0 to 1.0)
             mutation_rate: Probability of mutation per gene (0.0 to 1.0)
-            elite_percentage: Percentage of population to preserve as elite (0.0 to 1.0)
         """
         # Validate parameters
+        if not (1 <= generations <= 100):
+            raise ValueError(f"generations must be between 1 and 100, got {generations}")
+        if not (0.0 <= elite_percentage <= 1.0):
+            raise ValueError(f"elite_percentage must be between 0.0 and 1.0, got {elite_percentage}")
         if not (0.0 <= crossover_rate <= 1.0):
             raise ValueError(f"crossover_rate must be between 0.0 and 1.0, got {crossover_rate}")
         if not (0.0 <= mutation_rate <= 1.0):
             raise ValueError(f"mutation_rate must be between 0.0 and 1.0, got {mutation_rate}")
-        if not (0.0 <= elite_percentage <= 1.0):
-            raise ValueError(f"elite_percentage must be between 0.0 and 1.0, got {elite_percentage}")
         
         # Hyperparameter search spaces
         self.search_space = {
@@ -60,25 +65,54 @@ class GeneticHyperparameterTuner:
             'batch_size': [3, 5, 8, 10]
         }
         
-        # Fixed parameters
+        # Fixed parameters - UPDATED for stratified sampling
         self.fixed_params = {
             'accumulation_steps': 8,
-            'num_epochs': 50,
-            'validation_samples': 500
+            'total_training_samples': 500,  # Training samples per run
+            'validation_samples': 500,      # Fixed test set size
+            'num_evaluation_runs': 5,       # Multiple runs per candidate
+            'samples_per_class': 50,        # Stratified sampling
+            'stratified_sampling': True     # Enable stratified sampling
+        }
+        
+        # Multi-run fitness evaluator configuration
+        self.multi_run_config = {
+            'num_runs': self.fixed_params['num_evaluation_runs'],
+            'training_samples_per_run': self.fixed_params['total_training_samples'],
+            'test_samples': self.fixed_params['validation_samples'],
+            'samples_per_class': self.fixed_params['samples_per_class']
         }
         
         # GA parameters (user-configurable)
-        self.tournament_size = 3
-        self.mutation_rate = mutation_rate
+        self.generations = generations
+        self.elite_percentage = elite_percentage  # Now serves as survivor percentage
         self.crossover_rate = crossover_rate
-        self.elite_percentage = elite_percentage
+        self.mutation_rate = mutation_rate
+        
+        # Initialize fitness cache
+        self.fitness_cache = {}  # In-memory cache: {config_hash: fitness_score}
+        self.cache_file = "cache/genetic_algorithm/fitness_cache.json"
+        self.cache_stats = {
+            'hits': 0,
+            'misses': 0,
+            'total_evaluations': 0
+        }
         
         # Setup logging
         self.setup_logging()
         
+        # Load existing cache
+        self._load_cache()
+        
+        # Initialize multi-run fitness evaluator
+        self.multi_run_evaluator = create_multi_run_fitness_evaluator(**self.multi_run_config)
+        
         # Log GA configuration
-        self.logger.info(f"GA Parameters: crossover_rate={crossover_rate}, "
-                        f"mutation_rate={mutation_rate}, elite_percentage={elite_percentage}")
+        self.logger.info(f"GA Parameters: generations={generations}, elite_percentage={elite_percentage}, "
+                        f"crossover_rate={crossover_rate}, mutation_rate={mutation_rate}")
+        self.logger.info(f"Multi-run evaluation: {self.fixed_params['num_evaluation_runs']} runs per candidate")
+        self.logger.info(f"Stratified sampling: {self.fixed_params['total_training_samples']} samples per run")
+        self.logger.info(f"Fitness cache loaded: {len(self.fitness_cache)} cached evaluations")
         
     def setup_logging(self):
         """Setup logging for GA progress tracking."""
@@ -99,6 +133,104 @@ class GeneticHyperparameterTuner:
         
         self.logger = logging.getLogger(__name__)
         self.logger.info("Genetic Algorithm Hyperparameter Tuner initialized")
+    
+    def _generate_cache_key(self, individual: Dict[str, Any]) -> str:
+        """
+        Generate a deterministic cache key from hyperparameter configuration.
+        
+        Args:
+            individual: Dictionary of hyperparameter values
+            
+        Returns:
+            SHA-256 hash string for cache lookup
+        """
+        # Create a sorted, deterministic representation
+        cache_data = {
+            'hyperparams': dict(sorted(individual.items())),
+            'fixed_params': dict(sorted(self.fixed_params.items()))
+        }
+        
+        # Convert to JSON string with consistent formatting
+        cache_str = json.dumps(cache_data, sort_keys=True, separators=(',', ':'))
+        
+        # Generate SHA-256 hash
+        return hashlib.sha256(cache_str.encode('utf-8')).hexdigest()
+    
+    def _load_cache(self):
+        """Load existing fitness cache from JSON file."""
+        try:
+            # Create cache directory if it doesn't exist
+            os.makedirs(os.path.dirname(self.cache_file), exist_ok=True)
+            
+            if os.path.exists(self.cache_file):
+                with open(self.cache_file, 'r') as f:
+                    cache_data = json.load(f)
+                
+                # Validate cache structure
+                if 'fitness_cache' in cache_data and 'cache_metadata' in cache_data:
+                    # Check if fixed parameters match (cache validation)
+                    cached_fixed_params = cache_data['cache_metadata'].get('fixed_params', {})
+                    if cached_fixed_params == self.fixed_params:
+                        # Load fitness cache
+                        self.fitness_cache = {
+                            k: v['fitness'] for k, v in cache_data['fitness_cache'].items()
+                        }
+                        
+                        # Update cache stats
+                        metadata = cache_data['cache_metadata']
+                        self.cache_stats['total_evaluations'] = metadata.get('total_evaluations', 0)
+                        
+                        self.logger.info(f"Loaded {len(self.fitness_cache)} cached fitness evaluations")
+                    else:
+                        self.logger.warning("Cache invalidated due to fixed parameter mismatch")
+                        self.fitness_cache = {}
+                else:
+                    self.logger.warning("Invalid cache file format, starting with empty cache")
+                    self.fitness_cache = {}
+            else:
+                self.logger.info("No existing cache found, starting with empty cache")
+                self.fitness_cache = {}
+                
+        except Exception as e:
+            self.logger.error(f"Error loading cache: {e}")
+            self.fitness_cache = {}
+    
+    def _save_cache(self):
+        """Save current fitness cache to JSON file."""
+        try:
+            # Create cache directory if it doesn't exist
+            os.makedirs(os.path.dirname(self.cache_file), exist_ok=True)
+            
+            # Prepare cache data structure
+            cache_data = {
+                'cache_metadata': {
+                    'created': datetime.now().isoformat(),
+                    'last_updated': datetime.now().isoformat(),
+                    'total_evaluations': self.cache_stats['total_evaluations'],
+                    'cache_hits': self.cache_stats['hits'],
+                    'cache_misses': self.cache_stats['misses'],
+                    'fixed_params': self.fixed_params
+                },
+                'fitness_cache': {
+                    k: {
+                        'fitness': v,
+                        'timestamp': datetime.now().isoformat()
+                    } for k, v in self.fitness_cache.items()
+                }
+            }
+            
+            # Write to temporary file first, then rename (atomic operation)
+            temp_file = self.cache_file + '.tmp'
+            with open(temp_file, 'w') as f:
+                json.dump(cache_data, f, indent=2, default=str)
+            
+            # Atomic rename
+            os.rename(temp_file, self.cache_file)
+            
+            self.logger.info(f"Cache saved: {len(self.fitness_cache)} entries")
+            
+        except Exception as e:
+            self.logger.error(f"Error saving cache: {e}")
         
     def generate_individual(self) -> Dict[str, Any]:
         """
@@ -165,7 +297,7 @@ class GeneticHyperparameterTuner:
                 'optimizer': {
                     'base_learning_rate': individual['learning_rate'],
                     'effective_learning_rate': individual['learning_rate'] * (self.fixed_params['accumulation_steps'] ** 0.5),
-                    'num_epochs': self.fixed_params['num_epochs'],
+                    'num_epochs': 50,  # Will be dynamically calculated in multi-run evaluator
                     'warmup_epochs': individual['warmup_epochs'],
                     'batch_size': individual['batch_size']
                 }
@@ -230,85 +362,53 @@ class GeneticHyperparameterTuner:
     
     def evaluate_fitness(self, individual: Dict[str, Any]) -> float:
         """
-        Evaluate fitness of an individual through actual NeuroGraph training.
+        Evaluate fitness of an individual using multi-run stratified sampling with caching.
         
         Args:
             individual: Dictionary of hyperparameter values
             
         Returns:
-            Validation accuracy as fitness score (0.0 to 1.0)
+            Average validation accuracy across multiple runs as fitness score (0.0 to 1.0)
         """
-        temp_dir = None
+        # Generate cache key for this configuration
+        cache_key = self._generate_cache_key(individual)
+        
+        # Check if fitness is already cached
+        if cache_key in self.fitness_cache:
+            cached_fitness = self.fitness_cache[cache_key]
+            self.cache_stats['hits'] += 1
+            
+            # Log cache hit
+            param_str = ", ".join([f"{k}={v}" for k, v in individual.items()])
+            self.logger.info(f"Cache HIT for individual: {param_str}")
+            self.logger.info(f"Cached fitness: {cached_fitness:.4f}")
+            
+            return cached_fitness
+        
+        # Cache miss - need to evaluate fitness through multi-run training
+        self.cache_stats['misses'] += 1
+        self.cache_stats['total_evaluations'] += 1
+        
         try:
-            # Create temporary directory for this evaluation
-            temp_dir = tempfile.mkdtemp(prefix="ga_eval_")
-            
-            # Create NeuroGraph configuration
-            config = self.create_neurograph_config(individual)
-            
-            # Set temporary paths
-            config['paths']['graph_path'] = os.path.join(temp_dir, "temp_graph.pkl")
-            config['paths']['training_curves_path'] = os.path.join(temp_dir, "curves.png")
-            config['paths']['checkpoint_path'] = os.path.join(temp_dir, "checkpoints/")
-            
-            # Save temporary config file
-            config_path = os.path.join(temp_dir, "temp_config.yaml")
-            with open(config_path, 'w') as f:
-                yaml.dump(config, f, default_flow_style=False)
-            
             # Log evaluation start
             param_str = ", ".join([f"{k}={v}" for k, v in individual.items()])
-            self.logger.info(f"Evaluating individual: {param_str}")
+            self.logger.info(f"Cache MISS - Multi-run evaluation for individual: {param_str}")
             
-            # Create and train NeuroGraph model
-            trainer = create_modular_train_context(config_path)
+            # Use multi-run fitness evaluator for robust evaluation
+            mean_fitness = self.multi_run_evaluator.evaluate_candidate_fitness(individual)
             
-            # Run training
-            losses = trainer.train()
+            # Cache the result
+            self.fitness_cache[cache_key] = mean_fitness
             
-            # Evaluate validation accuracy
-            validation_accuracy = trainer.evaluate_accuracy(
-                num_samples=self.fixed_params['validation_samples'],
-                use_batch_evaluation=True
-            )
+            self.logger.info(f"Individual mean fitness: {mean_fitness:.4f} (cached)")
             
-            self.logger.info(f"Individual fitness: {validation_accuracy:.4f}")
-            
-            return validation_accuracy
+            return mean_fitness
             
         except Exception as e:
-            self.logger.error(f"Error evaluating individual: {e}")
+            self.logger.error(f"Error in multi-run evaluation: {e}")
             # Return low fitness for failed evaluations
             return 0.0
-            
-        finally:
-            # Clean up temporary directory
-            if temp_dir and os.path.exists(temp_dir):
-                try:
-                    shutil.rmtree(temp_dir)
-                except Exception as e:
-                    self.logger.warning(f"Failed to clean up temp directory {temp_dir}: {e}")
     
-    def tournament_selection(self, population: List[Dict[str, Any]], 
-                           fitness_scores: List[float]) -> Dict[str, Any]:
-        """
-        Select an individual using tournament selection.
-        
-        Args:
-            population: List of individuals
-            fitness_scores: Corresponding fitness scores
-            
-        Returns:
-            Selected individual
-        """
-        # Select random individuals for tournament
-        tournament_indices = random.sample(range(len(population)), self.tournament_size)
-        tournament_fitness = [fitness_scores[i] for i in tournament_indices]
-        
-        # Find winner (highest fitness)
-        winner_idx = tournament_indices[tournament_fitness.index(max(tournament_fitness))]
-        
-        return population[winner_idx].copy()
     
     def uniform_crossover(self, parent1: Dict[str, Any], 
                          parent2: Dict[str, Any]) -> Tuple[Dict[str, Any], Dict[str, Any]]:
@@ -377,7 +477,6 @@ class GeneticHyperparameterTuner:
         return [individual for individual, _ in paired[:k]]
     
     def genetic_hyperparam_search(self, config_input: Union[str, Dict], 
-                                 generations: int = 10, 
                                  population_size: int = 50, 
                                  top_k: int = 5) -> List[Dict[str, Any]]:
         """
@@ -385,7 +484,6 @@ class GeneticHyperparameterTuner:
         
         Args:
             config_input: Base configuration (dict or YAML file path) - currently unused
-            generations: Number of generations to evolve
             population_size: Size of population per generation
             top_k: Number of best configurations to return
             
@@ -393,7 +491,7 @@ class GeneticHyperparameterTuner:
             List of top-k best hyperparameter configurations with fitness scores
         """
         self.logger.info(f"Starting GA hyperparameter search:")
-        self.logger.info(f"  Generations: {generations}")
+        self.logger.info(f"  Generations: {self.generations}")
         self.logger.info(f"  Population size: {population_size}")
         self.logger.info(f"  Top-k: {top_k}")
         self.logger.info(f"  Search space: {len(self.search_space)} parameters")
@@ -407,8 +505,8 @@ class GeneticHyperparameterTuner:
         generation_stats = []
         
         # Evolution loop
-        for generation in range(generations):
-            self.logger.info(f"\n=== Generation {generation + 1}/{generations} ===")
+        for generation in range(self.generations):
+            self.logger.info(f"\n=== Generation {generation + 1}/{self.generations} ===")
             
             # Evaluate fitness for all individuals
             self.logger.info("Evaluating population fitness...")
@@ -416,7 +514,7 @@ class GeneticHyperparameterTuner:
             
             for i, individual in enumerate(population):
                 self.logger.info(f"Evaluating individual {i + 1}/{population_size}")
-                fitness = self.evaluate_fitness(individual)
+                fitness = self.evaluate_fitness(individual) ###
                 fitness_scores.append(fitness)
             
             # Track statistics
@@ -450,7 +548,7 @@ class GeneticHyperparameterTuner:
             })
             
             # Create next generation (except for last generation)
-            if generation < generations - 1:
+            if generation < self.generations - 1:
                 self.logger.info("Creating next generation...")
                 new_population = []
                 
@@ -461,11 +559,17 @@ class GeneticHyperparameterTuner:
                 
                 self.logger.info(f"Preserving {elite_count} elite individuals ({self.elite_percentage:.1%})")
                 
-                # Generate offspring through crossover and mutation
+                # Generate offspring through crossover and mutation using survivor-based selection
+                # Select survivors for breeding (top performers only)
+                survivor_count = max(1, int(population_size * self.elite_percentage))
+                survivors = self.select_top_k(population, fitness_scores, survivor_count)
+                
+                self.logger.info(f"Using top {survivor_count} survivors for breeding ({self.elite_percentage:.1%})")
+                
                 while len(new_population) < population_size:
-                    # Selection
-                    parent1 = self.tournament_selection(population, fitness_scores)
-                    parent2 = self.tournament_selection(population, fitness_scores)
+                    # Selection: Choose parents randomly from survivors only
+                    parent1 = random.choice(survivors)
+                    parent2 = random.choice(survivors)
                     
                     # Crossover
                     if random.random() < self.crossover_rate:
@@ -487,6 +591,19 @@ class GeneticHyperparameterTuner:
         self.logger.info(f"\nSelecting top-{top_k} individuals from all generations...")
         all_fitness = [ind['fitness'] for ind in all_time_best]
         top_individuals = self.select_top_k(all_time_best, all_fitness, top_k)
+        
+        # Save fitness cache
+        self._save_cache()
+        
+        # Log cache statistics
+        total_requests = self.cache_stats['hits'] + self.cache_stats['misses']
+        hit_rate = (self.cache_stats['hits'] / total_requests * 100) if total_requests > 0 else 0
+        self.logger.info(f"\n=== Cache Statistics ===")
+        self.logger.info(f"  Cache hits: {self.cache_stats['hits']}")
+        self.logger.info(f"  Cache misses: {self.cache_stats['misses']}")
+        self.logger.info(f"  Hit rate: {hit_rate:.1f}%")
+        self.logger.info(f"  Total evaluations: {self.cache_stats['total_evaluations']}")
+        self.logger.info(f"  Cached configurations: {len(self.fitness_cache)}")
         
         # Save results
         self.save_results(top_individuals, generation_stats)
@@ -552,11 +669,12 @@ def genetic_hyperparam_search(config_input: Union[str, Dict],
         List of top-k best hyperparameter configurations with fitness scores
     """
     tuner = GeneticHyperparameterTuner(
+        generations=generations,
+        elite_percentage=elite_percentage,
         crossover_rate=crossover_rate,
-        mutation_rate=mutation_rate,
-        elite_percentage=elite_percentage
+        mutation_rate=mutation_rate
     )
-    return tuner.genetic_hyperparam_search(config_input, generations, population_size, top_k)
+    return tuner.genetic_hyperparam_search(config_input, population_size, top_k)
 
 
 if __name__ == "__main__":
