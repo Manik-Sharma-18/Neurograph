@@ -1,6 +1,6 @@
 """
 Modular Configuration System for NeuroGraph
-Supports both modular and legacy configurations with fallback mechanisms.
+Modern configuration loader for production use.
 """
 
 import yaml
@@ -9,140 +9,37 @@ from typing import Dict, Any, Optional
 import torch
 
 class ModularConfig:
-    """Enhanced configuration loader with modular support and fallbacks."""
+    """Modern configuration loader for NeuroGraph."""
     
-    def __init__(self, config_path: str = "config/modular_neurograph.yaml"):
+    def __init__(self, config_path: str = "config/production.yaml"):
         """
         Initialize modular configuration system.
         
         Args:
-            config_path: Path to primary configuration file
+            config_path: Path to configuration file
         """
         self.config_path = config_path
         self.config = {}
         self.mode = "modular"
-        self.fallback_enabled = True
         
         self.load_config()
         self.validate_config()
         self.setup_derived_parameters()
     
     def load_config(self):
-        """Load configuration with fallback support."""
+        """Load configuration file."""
         try:
             with open(self.config_path, 'r') as f:
                 self.config = yaml.safe_load(f)
             
             self.mode = self.config.get('system', {}).get('mode', 'modular')
-            self.fallback_enabled = self.config.get('fallback', {}).get('enable_legacy_mode', True)
-            
             print(f"✅ Loaded {self.mode} configuration from {self.config_path}")
             
         except FileNotFoundError:
-            if self.fallback_enabled:
-                print(f"⚠️  Primary config not found, falling back to legacy...")
-                self.load_fallback_config()
-            else:
-                raise FileNotFoundError(f"Configuration file not found: {self.config_path}")
+            raise FileNotFoundError(f"Configuration file not found: {self.config_path}")
         except Exception as e:
-            if self.fallback_enabled and self.config.get('fallback', {}).get('auto_fallback_on_error', True):
-                print(f"⚠️  Config error: {e}, falling back to legacy...")
-                self.load_fallback_config()
-            else:
-                raise
+            raise RuntimeError(f"Failed to load configuration: {e}")
     
-    def load_fallback_config(self):
-        """Load legacy configuration as fallback."""
-        fallback_path = "config/default.yaml"
-        try:
-            with open(fallback_path, 'r') as f:
-                legacy_config = yaml.safe_load(f)
-            
-            # Convert legacy config to modular format
-            self.config = self.convert_legacy_to_modular(legacy_config)
-            self.mode = "legacy"
-            print(f"✅ Loaded legacy configuration from {fallback_path}")
-            
-        except Exception as e:
-            raise RuntimeError(f"Failed to load fallback configuration: {e}")
-    
-    def convert_legacy_to_modular(self, legacy_config: Dict[str, Any]) -> Dict[str, Any]:
-        """Convert legacy configuration format to modular format."""
-        modular_config = {
-            'system': {
-                'mode': 'legacy',
-                'version': '1.0',
-                'description': 'Legacy configuration converted to modular format'
-            },
-            'architecture': {
-                'total_nodes': legacy_config.get('total_nodes', 50),
-                'input_nodes': legacy_config.get('num_input_nodes', 5),
-                'output_nodes': legacy_config.get('num_output_nodes', 10),
-                'vector_dim': legacy_config.get('vector_dim', 5),
-                'seed': legacy_config.get('seed', 42)
-            },
-            'resolution': {
-                'phase_bins': legacy_config.get('phase_bins', 8),
-                'mag_bins': legacy_config.get('mag_bins', 256),
-                'resolution_increase': 1
-            },
-            'graph_structure': {
-                'cardinality': legacy_config.get('cardinality', 3),
-                'top_k_neighbors': legacy_config.get('top_k_neighbors', 4),
-                'use_radiation': legacy_config.get('use_radiation', True)
-            },
-            'input_processing': {
-                'adapter_type': 'pca',
-                'input_dim': 784,
-                'learnable': False,
-                'normalization': None,
-                'dropout': 0.0
-            },
-            'class_encoding': {
-                'type': 'random',
-                'num_classes': 10,
-                'encoding_dim': legacy_config.get('vector_dim', 5),
-                'orthogonality_threshold': 0.5
-            },
-            'loss_function': {
-                'type': 'mse',
-                'temperature': 1.0,
-                'label_smoothing': 0.0
-            },
-            'training': {
-                'gradient_accumulation': {
-                    'enabled': False,
-                    'accumulation_steps': 1,
-                    'lr_scaling': 'none',
-                    'buffer_size': 100
-                },
-                'optimizer': {
-                    'type': 'discrete_sgd',
-                    'base_learning_rate': legacy_config.get('learning_rate', 0.001),
-                    'warmup_epochs': legacy_config.get('warmup_epochs', 5),
-                    'num_epochs': legacy_config.get('num_epochs', 50),
-                    'batch_size': legacy_config.get('batch_size', 5)
-                }
-            },
-            'forward_pass': {
-                'max_timesteps': legacy_config.get('max_timesteps', 6),
-                'decay_factor': legacy_config.get('decay_factor', 0.925),
-                'min_activation_strength': legacy_config.get('min_activation_strength', 0.01),
-                'min_output_activation_timesteps': legacy_config.get('min_output_activation_timesteps', 3)
-            },
-            'paths': {
-                'graph_path': legacy_config.get('graph_path', 'config/static_graph.pkl'),
-                'log_path': legacy_config.get('log_path', 'logs/'),
-                'checkpoint_path': 'checkpoints/legacy/'
-            },
-            'fallback': {
-                'enable_legacy_mode': True,
-                'legacy_config_path': 'config/default.yaml',
-                'auto_fallback_on_error': True
-            }
-        }
-        
-        return modular_config
     
     def validate_config(self):
         """Validate configuration parameters."""
@@ -251,10 +148,6 @@ class ModularConfig:
         """Check if running in modular mode."""
         return self.mode == "modular"
     
-    def is_legacy(self) -> bool:
-        """Check if running in legacy mode."""
-        return self.mode == "legacy"
-    
     def get_summary(self) -> str:
         """Get configuration summary."""
         arch = self.config['architecture']
@@ -302,14 +195,8 @@ Loss Function:
         with open(output_path, 'w') as f:
             yaml.dump(self.config, f, default_flow_style=False, indent=2)
         
-        print(f"💾 Configuration saved to {output_path}")
+        print(f"� Configuration saved to {output_path}")
 
 def load_modular_config(config_path: str = "config/modular_neurograph.yaml") -> ModularConfig:
     """Convenience function to load modular configuration."""
     return ModularConfig(config_path)
-
-# Backward compatibility
-def load_config(path: str = "config/modular_neurograph.yaml") -> Dict[str, Any]:
-    """Legacy function for backward compatibility."""
-    config_loader = ModularConfig(path)
-    return config_loader.config

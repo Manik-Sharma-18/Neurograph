@@ -42,6 +42,7 @@ class GeneticHyperparameterTuner:
             mutation_rate: Probability of mutation per gene (0.0 to 1.0)
         """
         # Validate parameters
+        
         if not (1 <= generations <= 100):
             raise ValueError(f"generations must be between 1 and 100, got {generations}")
         if not (0.0 <= elite_percentage <= 1.0):

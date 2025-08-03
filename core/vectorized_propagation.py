@@ -8,7 +8,6 @@ import torch.nn.functional as F
 from typing import Dict, List, Tuple, Optional, Set
 import pandas as pd
 from core.node_store import NodeStore
-from core.cell import PhaseCell
 from core.modular_cell import ModularPhaseCell
 
 
@@ -124,23 +123,26 @@ class VectorizedPropagationEngine:
     def _init_batch_tensors(self):
         """Initialize pre-allocated tensors for batch operations."""
         # Pre-allocated tensors for batch processing
+        vector_dim = getattr(self.phase_cell, 'vector_dim', getattr(self.phase_cell, 'D', 5))
+        self.vector_dim = vector_dim
+        
         self.batch_source_phases = torch.zeros(
-            (self.max_nodes, self.phase_cell.D), 
+            (self.max_nodes, vector_dim), 
             dtype=torch.long, 
             device=self.device
         )
         self.batch_source_mags = torch.zeros(
-            (self.max_nodes, self.phase_cell.D), 
+            (self.max_nodes, vector_dim), 
             dtype=torch.long, 
             device=self.device
         )
         self.batch_target_phases = torch.zeros(
-            (self.max_nodes, self.phase_cell.D), 
+            (self.max_nodes, vector_dim), 
             dtype=torch.long, 
             device=self.device
         )
         self.batch_target_mags = torch.zeros(
-            (self.max_nodes, self.phase_cell.D), 
+            (self.max_nodes, vector_dim), 
             dtype=torch.long, 
             device=self.device
         )
@@ -189,7 +191,7 @@ class VectorizedPropagationEngine:
         if num_active == 0:
             # Return empty tensors
             empty_tensor = torch.empty(0, dtype=torch.long, device=self.device)
-            empty_phases = torch.empty(0, self.phase_cell.D, dtype=torch.long, device=self.device)
+            empty_phases = torch.empty(0, self.vector_dim, dtype=torch.long, device=self.device)
             empty_strengths = torch.empty(0, dtype=torch.float32, device=self.device)
             return empty_tensor, empty_phases, empty_phases, empty_strengths
         
@@ -213,7 +215,7 @@ class VectorizedPropagationEngine:
         if not all_target_indices:
             # No targets found
             empty_tensor = torch.empty(0, dtype=torch.long, device=self.device)
-            empty_phases = torch.empty(0, self.phase_cell.D, dtype=torch.long, device=self.device)
+            empty_phases = torch.empty(0, self.vector_dim, dtype=torch.long, device=self.device)
             empty_strengths = torch.empty(0, dtype=torch.float32, device=self.device)
             return empty_tensor, empty_phases, empty_phases, empty_strengths
         
@@ -378,7 +380,7 @@ class VectorizedPropagationEngine:
             All node phases [num_nodes, vector_dim]
         """
         all_phases = torch.zeros(
-            (num_nodes, self.phase_cell.D), 
+            (num_nodes, self.vector_dim), 
             dtype=torch.long, 
             device=self.device
         )
@@ -409,8 +411,11 @@ class VectorizedPropagationEngine:
         # Expand source phase for broadcasting
         source_expanded = source_phase.unsqueeze(0).expand_as(candidate_phases)
         
+        # Get phase bins from phase cell
+        phase_bins = getattr(self.phase_cell, 'phase_bins', getattr(self.phase_cell, 'N', 32))
+        
         # Compute phase sums (mod N)
-        phase_sums = (source_expanded + candidate_phases) % self.phase_cell.N
+        phase_sums = (source_expanded + candidate_phases) % phase_bins
         
         # Use lookup table for phase alignment
         if hasattr(self.phase_cell, 'lookup'):
@@ -420,7 +425,7 @@ class VectorizedPropagationEngine:
         else:
             # Fallback: simple cosine approximation
             alignment_scores = torch.cos(
-                2 * torch.pi * phase_sums.float() / self.phase_cell.N
+                2 * torch.pi * phase_sums.float() / phase_bins
             ).sum(dim=1)
         
         return alignment_scores
@@ -449,7 +454,7 @@ class VectorizedPropagationEngine:
         num_propagations = len(source_indices)
         
         if num_propagations == 0:
-            empty_phases = torch.empty(0, self.phase_cell.D, dtype=torch.long, device=self.device)
+            empty_phases = torch.empty(0, self.vector_dim, dtype=torch.long, device=self.device)
             empty_strengths = torch.empty(0, dtype=torch.float32, device=self.device)
             return empty_phases, empty_phases, empty_strengths
         
@@ -458,12 +463,12 @@ class VectorizedPropagationEngine:
         
         # Gather source context data
         source_phases_batch = torch.zeros(
-            (num_propagations, self.phase_cell.D), 
+            (num_propagations, self.vector_dim), 
             dtype=torch.long, 
             device=self.device
         )
         source_mags_batch = torch.zeros(
-            (num_propagations, self.phase_cell.D), 
+            (num_propagations, self.vector_dim), 
             dtype=torch.long, 
             device=self.device
         )
@@ -476,12 +481,12 @@ class VectorizedPropagationEngine:
         
         # Gather target self data
         target_phases_batch = torch.zeros(
-            (num_propagations, self.phase_cell.D), 
+            (num_propagations, self.vector_dim), 
             dtype=torch.long, 
             device=self.device
         )
         target_mags_batch = torch.zeros(
-            (num_propagations, self.phase_cell.D), 
+            (num_propagations, self.vector_dim), 
             dtype=torch.long, 
             device=self.device
         )

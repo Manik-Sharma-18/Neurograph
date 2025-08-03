@@ -445,10 +445,3 @@ def create_class_encoder(encoding_type: str = "orthogonal", **kwargs) -> Orthogo
         return StructuredClassEncoder(**kwargs)
     else:
         raise ValueError(f"Unknown encoding type: {encoding_type}")
-
-# Backward compatibility
-def generate_orthogonal_class_encodings(num_classes: int = 10, vector_dim: int = 5,
-                                      phase_bins: int = 64, mag_bins: int = 1024) -> Dict[int, Tuple[torch.Tensor, torch.Tensor]]:
-    """Legacy function for backward compatibility."""
-    encoder = OrthogonalClassEncoder(num_classes, vector_dim, phase_bins, mag_bins)
-    return encoder.get_all_encodings()

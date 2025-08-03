@@ -100,18 +100,10 @@ def evaluate_model(trainer, num_samples=None, use_batch_evaluation=False):
     
     print(f"\nEvaluating model ({num_samples} samples)...")
     
-    if use_batch_evaluation:
-        # Use batch evaluation if available and requested
-        try:
-            accuracy = trainer.evaluate_accuracy(
-                num_samples=num_samples, 
-                use_batch_evaluation=True
-            )
-        except:
-            # Fallback to standard evaluation
-            accuracy = trainer.evaluate_accuracy(num_samples=num_samples)
-    else:
-        accuracy = trainer.evaluate_accuracy(num_samples=num_samples)
+    accuracy = trainer.evaluate_accuracy(
+        num_samples=num_samples, 
+        use_batch_evaluation=use_batch_evaluation
+    )
     
     print(f"Accuracy: {accuracy:.1%} (evaluated on {num_samples} samples)")
     return accuracy
@@ -216,9 +208,6 @@ def main():
                        help='Number of training epochs (overrides config)')
     parser.add_argument('--quick', action='store_true', 
                        help='Quick test mode (reduced epochs)')
-    parser.add_argument('--eval-only', action='store_true', 
-                       help='Evaluation only mode (deprecated: use --mode evaluate)')
-    
     # Evaluation options
     parser.add_argument('--eval-samples', type=int, default=1000,
                        help='Number of samples for evaluation')
@@ -228,16 +217,8 @@ def main():
     parser.add_argument('--checkpoint', type=str, help='Checkpoint to load')
     parser.add_argument('--no-plot', action='store_true', 
                        help='Disable training curve plotting')
-    parser.add_argument('--benchmark', action='store_true',
-                       help='Enable performance benchmarking (deprecated: use --mode benchmark)')
     
     args = parser.parse_args()
-    
-    # Handle deprecated arguments
-    if args.eval_only:
-        args.mode = 'evaluate'
-    if args.benchmark:
-        args.mode = 'benchmark'
     
     # Display header
     if args.production:

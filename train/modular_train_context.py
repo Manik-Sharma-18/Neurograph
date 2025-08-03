@@ -22,8 +22,8 @@ from train.gradient_accumulator import create_gradient_accumulator, BatchControl
 
 # Import core components
 from core.node_store import NodeStore
-from core.modular_forward_engine import create_modular_forward_engine
-from core.activation_table import ActivationTable
+from core.modular_forward_engine import create_vectorized_forward_engine
+from core.activation_table import create_vectorized_activation_table
 from core.graph import build_static_graph
 
 # Performance monitoring decorator
@@ -57,10 +57,9 @@ class ModularTrainContext:
     - Gradient accumulation with √N scaling
     - Categorical cross-entropy loss with orthogonal encodings
     - Linear input projection (learnable)
-    - Legacy fallback support
     """
     
-    def __init__(self, config_path: str = "config/modular_neurograph.yaml"):
+    def __init__(self, config_path: str = "config/production.yaml"):
         """
         Initialize modular training context.
         
@@ -115,13 +114,13 @@ class ModularTrainContext:
         # Node parameter storage (will be initialized after graph setup)
         self.node_store = None
         
-        # Activation tracking
-        self.activation_table = ActivationTable(
+        # Vectorized activation tracking
+        self.activation_table = create_vectorized_activation_table(
+            max_nodes=self.config.get('architecture.total_nodes'),
             vector_dim=self.config.get('architecture.vector_dim'),
             phase_bins=self.config.get('resolution.phase_bins'),
             mag_bins=self.config.get('resolution.mag_bins'),
-            decay_factor=self.config.get('forward_pass.decay_factor'),
-            min_strength=self.config.get('forward_pass.min_activation_strength'),
+            config=self.config.config,
             device=self.device
         )
         
@@ -148,15 +147,7 @@ class ModularTrainContext:
                 device=self.device
             ).to(self.device)
         else:
-            # Fallback to legacy PCA adapter
-            from modules.input_adapters import MNISTPCAAdapter
-            self.input_adapter = MNISTPCAAdapter(
-                vector_dim=self.config.get('architecture.vector_dim'),
-                num_input_nodes=self.config.get('architecture.input_nodes'),
-                phase_bins=self.config.get('resolution.phase_bins'),
-                mag_bins=self.config.get('resolution.mag_bins'),
-                device=self.device
-            )
+            raise ValueError(f"Unsupported input adapter type: {adapter_type}. Only 'linear_projection' is supported.")
         
         # Setup node IDs
         self.input_nodes = list(range(self.config.get('architecture.input_nodes')))
@@ -195,9 +186,7 @@ class ModularTrainContext:
                 label_smoothing=self.config.get('loss_function.label_smoothing')
             )
         else:
-            # Fallback to legacy MSE loss
-            from modules.loss import signal_loss_from_lookup
-            self.loss_function = signal_loss_from_lookup
+            raise ValueError(f"Unsupported loss function type: {loss_type}. Only 'categorical_crossentropy' is supported.")
         
         print(f"   ✅ Output processing initialized")
         print(f"      🎯 Class encoding: {encoding_type}")
@@ -272,12 +261,12 @@ class ModularTrainContext:
             mag_bins=self.config.get('resolution.mag_bins')
         ).to(self.device)
         
-        # Setup forward engine
-        self.forward_engine = create_modular_forward_engine(
+        # Setup vectorized forward engine
+        self.forward_engine = create_vectorized_forward_engine(
             graph_df=self.graph_df,
             node_store=self.node_store,
             phase_cell=self.phase_cell,
-            activation_table=self.activation_table,
+            lookup_table=self.lookup_tables,
             config=self.config.config,
             device=self.device
         )
@@ -296,12 +285,18 @@ class ModularTrainContext:
         Returns:
             Output node signals
         """
-        # Run forward propagation
-        final_activation_table = self.forward_engine.propagate(input_context)
+        # Convert input context to string format for vectorized forward engine
+        string_input_context = {}
+        for node_id, (phase_idx, mag_idx) in input_context.items():
+            string_node_id = f"n{node_id}"
+            string_input_context[string_node_id] = (phase_idx, mag_idx)
         
-        # Extract output signals (convert integer node IDs to string format)
+        # Run vectorized forward propagation
+        final_activation_table = self.forward_engine.forward_pass_vectorized(string_input_context)
+        
+        # Extract output signals using vectorized interface
         output_signals = {}
-        final_context = final_activation_table.get_active_context()
+        final_context = final_activation_table.get_active_context_dict()
         
         for node_id in self.output_nodes:
             # Convert integer node ID to string format
@@ -547,7 +542,7 @@ class ModularTrainContext:
                     self.config.get('resolution.mag_bins')
                 )
         else:
-            # Direct parameter updates (legacy mode)
+            # Direct parameter updates
             self.apply_direct_updates(node_gradients)
         
         return loss.item(), accuracy
@@ -792,7 +787,7 @@ class ModularTrainContext:
             )
             return results['accuracy']
         
-        # Fallback to legacy evaluation
+        # Standard evaluation
         if hasattr(self.input_adapter, 'eval'):
             self.input_adapter.eval()
         
@@ -1007,6 +1002,6 @@ class ModularTrainContext:
                 print(f"  Status: {stats}")
 
 # Factory function
-def create_modular_train_context(config_path: str = "config/modular_neurograph.yaml") -> ModularTrainContext:
+def create_modular_train_context(config_path: str = "config/production.yaml") -> ModularTrainContext:
     """Create modular training context."""
     return ModularTrainContext(config_path)

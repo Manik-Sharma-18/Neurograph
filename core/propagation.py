@@ -1,14 +1,14 @@
 # core/propagation.py
 
 import torch
-from core.cell import PhaseCell
+from core.modular_cell import ModularPhaseCell
 from core.node_store import NodeStore
 from core.radiation import get_radiation_neighbors
 
 def propagate_step(
     active_nodes: dict,
     node_store: NodeStore,
-    phase_cell: PhaseCell,
+    phase_cell: ModularPhaseCell,
     graph_df,
     lookup_table,
     use_radiation: bool = True,

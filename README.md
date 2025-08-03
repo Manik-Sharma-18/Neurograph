@@ -79,26 +79,36 @@ training:
 ```
 Neurograph/
 ├── main.py                 # Primary entry point
-├── main_production.py      # Production training script
 ├── README.md               # This file
 ├── config/
 │   └── production.yaml     # Production configuration
-├── core/                   # Core neural components
-│   ├── radiation.py        # Dynamic neighbor selection
-│   ├── graph.py           # Graph structure
-│   ├── forward_engine.py  # Forward propagation
+├── core/                   # Core neural components (GPU-accelerated)
+│   ├── modular_forward_engine.py  # Vectorized forward engine
+│   ├── activation_table.py        # GPU tensor-based activation table
+│   ├── vectorized_propagation.py  # Batch propagation engine
+│   ├── high_res_tables.py         # High-resolution lookup tables
 │   └── ...
 ├── modules/                # Input/output processing
-│   ├── linear_input_adapter.py
-│   ├── orthogonal_encodings.py
+│   ├── linear_input_adapter.py    # Learnable input projection
+│   ├── orthogonal_encodings.py    # Class encoding system
 │   └── ...
 ├── train/                  # Training contexts
-│   └── modular_train_context.py
-├── utils/                  # Utilities
+│   └── modular_train_context.py   # Modular training system
+├── utils/                  # Utilities and configuration
+├── docs/                   # 📚 Comprehensive documentation
+│   ├── README.md           # Documentation index
+│   ├── analysis/           # System analysis and cleanup docs
+│   ├── implementation/     # Technical implementation guides
+│   └── integration/        # Integration and flow documentation
+├── tests/                  # 🧪 Organized test suite
+│   ├── README.md           # Testing guide
+│   ├── performance/        # GPU and performance tests
+│   ├── genetic/            # Genetic algorithm tests
+│   └── integration/        # System integration tests
 ├── cache/                  # Encoding caches
 ├── logs/                   # Training logs
-├── memory-bank/           # Project documentation
-└── archive/               # Historical files
+├── memory-bank/           # Project memory bank
+└── archive/               # Historical files and backups
 ```
 
 ## 🧠 Technical Details

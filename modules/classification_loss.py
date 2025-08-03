@@ -383,12 +383,3 @@ def create_classification_loss(loss_type: str = "standard", **kwargs) -> Classif
         return MultiOutputClassificationLoss(**kwargs)
     else:
         raise ValueError(f"Unknown loss type: {loss_type}")
-
-# Backward compatibility
-def signal_loss_from_lookup(pred_phase_idx: torch.Tensor, pred_mag_idx: torch.Tensor, 
-                          tgt_phase_idx: torch.Tensor, tgt_mag_idx: torch.Tensor, 
-                          lookup: HighResolutionLookupTables) -> torch.Tensor:
-    """Legacy MSE loss function for backward compatibility."""
-    pred_signal = lookup.get_signal_vector(pred_phase_idx, pred_mag_idx)
-    tgt_signal = lookup.get_signal_vector(tgt_phase_idx, tgt_mag_idx)
-    return F.mse_loss(pred_signal, tgt_signal)
