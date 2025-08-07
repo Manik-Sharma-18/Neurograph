@@ -35,7 +35,7 @@ class HighResolutionLookupTables(nn.Module):
     - Gradient computation for discrete updates
     """
     
-    def __init__(self, phase_bins: int = 64, mag_bins: int = 1024, device: str = 'cpu'):
+    def __init__(self, phase_bins: int, mag_bins: int, device: str = 'cpu'):
         """
         Initialize high-resolution lookup tables.
         
@@ -79,20 +79,27 @@ class HighResolutionLookupTables(nn.Module):
         self.register_buffer('phase_grad_table', -torch.sin(phase_values))
     
     def setup_magnitude_tables(self):
-        """Setup magnitude-related lookup tables."""
-        # Magnitude values: exponential mapping from [-3, 3] to [0, M-1]
-        mag_range = torch.linspace(-3, 3, self.M)
+        """Setup magnitude-related lookup tables with bounded exp(sin(x)) function."""
+        # Magnitude values: map indices to [-π, π] for sin input
+        mag_range = torch.linspace(-math.pi, math.pi, self.M)
         
-        # Exponential table for magnitude computation
-        self.register_buffer('mag_exp_table', torch.exp(mag_range))
+        # NEW: exp(sin(magnitude)) for bounded output [exp(-1), exp(1)] ≈ [0.37, 2.72]
+        sin_vals = torch.sin(mag_range)
+        self.register_buffer('mag_exp_sin_table', torch.exp(sin_vals))
         
-        # Magnitude gradient table: exp(x) derivative is exp(x)
-        self.register_buffer('mag_grad_table', torch.exp(mag_range))
+        # Gradient: d/dx[exp(sin(x))] = cos(x) * exp(sin(x))
+        cos_vals = torch.cos(mag_range)
+        self.register_buffer('mag_exp_sin_grad_table', cos_vals * torch.exp(sin_vals))
+        
+        # Keep legacy tables for backward compatibility
+        self.register_buffer('mag_exp_table', torch.exp(torch.linspace(-3, 3, self.M)))
+        self.register_buffer('mag_grad_table', torch.exp(torch.linspace(-3, 3, self.M)))
         
         # Alternative: sigmoid mapping for bounded magnitudes
-        self.register_buffer('mag_sigmoid_table', torch.sigmoid(mag_range))
+        sigmoid_range = torch.linspace(-3, 3, self.M)
+        self.register_buffer('mag_sigmoid_table', torch.sigmoid(sigmoid_range))
         self.register_buffer('mag_sigmoid_grad_table', 
-                           torch.sigmoid(mag_range) * (1 - torch.sigmoid(mag_range)))
+                           torch.sigmoid(sigmoid_range) * (1 - torch.sigmoid(sigmoid_range)))
     
     def setup_gradient_tables(self):
         """Setup gradient computation tables."""
@@ -135,11 +142,11 @@ class HighResolutionLookupTables(nn.Module):
     
     def lookup_magnitude(self, mag_indices: torch.Tensor, use_sigmoid: bool = False) -> torch.Tensor:
         """
-        Lookup magnitude values for magnitude indices.
+        Lookup magnitude values for magnitude indices using exp(sin(x)) for boundedness.
         
         Args:
             mag_indices: LongTensor of shape [...] with values in [0, M-1]
-            use_sigmoid: If True, use sigmoid mapping instead of exponential
+            use_sigmoid: If True, use sigmoid mapping instead of exp(sin(x))
             
         Returns:
             FloatTensor of magnitude values with same shape as input
@@ -149,7 +156,8 @@ class HighResolutionLookupTables(nn.Module):
         if use_sigmoid:
             return self.mag_sigmoid_table[mag_indices]
         else:
-            return self.mag_exp_table[mag_indices]
+            # Use new bounded exp(sin(x)) function by default
+            return self.mag_exp_sin_table[mag_indices]
     
     def lookup_phase_grad(self, phase_indices: torch.Tensor) -> torch.Tensor:
         """
@@ -166,11 +174,11 @@ class HighResolutionLookupTables(nn.Module):
     
     def lookup_magnitude_grad(self, mag_indices: torch.Tensor, use_sigmoid: bool = False) -> torch.Tensor:
         """
-        Lookup magnitude gradients for discrete gradient computation.
+        Lookup magnitude gradients for discrete gradient computation using exp(sin(x)) derivatives.
         
         Args:
             mag_indices: LongTensor of shape [...] with values in [0, M-1]
-            use_sigmoid: If True, use sigmoid gradients instead of exponential
+            use_sigmoid: If True, use sigmoid gradients instead of exp(sin(x))
             
         Returns:
             FloatTensor of magnitude gradients with same shape as input
@@ -180,7 +188,8 @@ class HighResolutionLookupTables(nn.Module):
         if use_sigmoid:
             return self.mag_sigmoid_grad_table[mag_indices] * self.mag_grad_scale
         else:
-            return self.mag_grad_table[mag_indices] * self.mag_grad_scale
+            # Use new exp(sin(x)) gradients by default
+            return self.mag_exp_sin_grad_table[mag_indices] * self.mag_grad_scale
     
     @jit_compile_if_enabled
     def get_signal_vector(self, phase_indices: torch.Tensor, mag_indices: torch.Tensor, 
@@ -308,9 +317,7 @@ class HighResolutionLookupTables(nn.Module):
         """
         Convert continuous gradients to discrete parameter updates.
         
-        Maps continuous gradients back to discrete index updates using:
-        - Phase resolution: 2π / N_phase_bins
-        - Magnitude resolution: 6.0 / N_mag_bins (range [-3, 3])
+        Enhanced version with better sensitivity for small gradients.
         
         Args:
             phase_grad: Continuous phase gradients [D]
@@ -324,14 +331,43 @@ class HighResolutionLookupTables(nn.Module):
         phase_resolution = 2 * math.pi / self.N
         mag_resolution = 6.0 / self.M
         
+        # Enhanced quantization with better sensitivity
+        # Use a minimum threshold to ensure small gradients still cause updates
+        min_update_threshold = 0.1  # Minimum value to trigger a discrete update
+        
         # Convert to discrete updates (negative for gradient descent)
-        discrete_phase_updates = torch.round(
-            -learning_rate * phase_grad / phase_resolution
+        phase_continuous = -learning_rate * phase_grad / phase_resolution
+        mag_continuous = -learning_rate * mag_grad / mag_resolution
+        
+        # Apply enhanced quantization:
+        # 1. Use sign to preserve direction
+        # 2. Apply minimum threshold for small gradients
+        # 3. Use ceiling for values above threshold to ensure updates happen
+        
+        discrete_phase_updates = torch.where(
+            torch.abs(phase_continuous) >= min_update_threshold,
+            torch.sign(phase_continuous) * torch.ceil(torch.abs(phase_continuous)),
+            torch.where(
+                torch.abs(phase_continuous) > 1e-6,  # Very small but non-zero
+                torch.sign(phase_continuous),  # At least ±1 update
+                torch.zeros_like(phase_continuous)
+            )
         ).long()
         
-        discrete_mag_updates = torch.round(
-            -learning_rate * mag_grad / mag_resolution  
+        discrete_mag_updates = torch.where(
+            torch.abs(mag_continuous) >= min_update_threshold,
+            torch.sign(mag_continuous) * torch.ceil(torch.abs(mag_continuous)),
+            torch.where(
+                torch.abs(mag_continuous) > 1e-6,  # Very small but non-zero
+                torch.sign(mag_continuous),  # At least ±1 update
+                torch.zeros_like(mag_continuous)
+            )
         ).long()
+        
+        # Debug information (can be removed in production)
+        if torch.any(discrete_phase_updates != 0) or torch.any(discrete_mag_updates != 0):
+            print(f"      🔧 Discrete Updates: Phase={torch.sum(torch.abs(discrete_phase_updates)).item():.0f} changes, "
+                  f"Mag={torch.sum(torch.abs(discrete_mag_updates)).item():.0f} changes")
         
         return discrete_phase_updates, discrete_mag_updates
     
@@ -412,7 +448,7 @@ class QuantizationUtils:
     """Utility functions for high-resolution quantization."""
     
     @staticmethod
-    def adaptive_quantize_phase(values: torch.Tensor, phase_bins: int = 64) -> torch.Tensor:
+    def adaptive_quantize_phase(values: torch.Tensor, phase_bins: int) -> torch.Tensor:
         """
         Adaptive phase quantization with improved distribution.
         
@@ -439,7 +475,7 @@ class QuantizationUtils:
         return torch.clamp(indices, 0, phase_bins - 1)
     
     @staticmethod
-    def adaptive_quantize_magnitude(values: torch.Tensor, mag_bins: int = 1024) -> torch.Tensor:
+    def adaptive_quantize_magnitude(values: torch.Tensor, mag_bins: int) -> torch.Tensor:
         """
         Adaptive magnitude quantization with improved distribution.
         

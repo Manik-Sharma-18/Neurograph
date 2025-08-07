@@ -58,7 +58,7 @@ loss_function:
   temperature: 1.0
   label_smoothing: 0.0
 
-# Training Configuration - Optimized for stability and speed
+# Training Configuration - Optimized for enhanced input adapter
 training:
   gradient_accumulation:
     enabled: true
@@ -68,25 +68,26 @@ training:
   
   optimizer:
     type: "discrete_sgd"
-    base_learning_rate: 0.001    # Optimized for discrete gradients
-    effective_learning_rate: 0.001  # base_lr * √8
-    warmup_epochs: 2             # Reduced warmup
+    base_learning_rate: 0.003    # Increased 4x to address parameter stagnation
+    effective_learning_rate: 0.003  # Override √8 scaling initially for discrete updates
+    warmup_epochs: 3             # Increased for enhanced adapter
     num_epochs: 15               # Production training length
     batch_size: 8                # Optimal batch size for training
+    gradient_clipping: 1.0       # Prevent exploding gradients in deep network
   
   # Quick evaluation mode for development
   quick_mode:
-    epochs: 3
-    warmup_epochs: 1
+    epochs: 5                    # Increased for better testing
+    warmup_epochs: 2
     batch_size: 4
 
-# Forward Pass - Optimized for speed and accuracy
+# Forward Pass - Quality-focused signal propagation with high strength threshold
 forward_pass:
-  max_timesteps: 25                    # Reduced from 35 for speed
-  decay_factor: 0.9                    # Slightly faster decay
-  min_activation_strength: 0.05        # Higher threshold for pruning
+  max_timesteps: 40                    # Increased from 25 for better propagation
+  decay_factor: 0.6                    # Very aggressive decay to prevent overflow
+  min_activation_strength: 1.0         # High threshold - only strong signals survive
   min_output_activation_timesteps: 2   # Early termination
-  verbose: false                       # Disable verbose logging in production
+  verbose: true                        # Enable verbose logging for diagnostics
 
 # Activation Balancing - Prevents dead nodes
 activation_balancing:
@@ -150,8 +151,8 @@ debugging:
   verbose_logging: false
   save_intermediate_states: false
   plot_training_curves: false
-  evaluation_samples: 500      # Reduced for faster evaluation
-  final_evaluation_samples: 1000
+  evaluation_samples: 100      # Reduced to 100 for faster evaluation
+  final_evaluation_samples: 100   # Reduced to 100 for faster evaluation
   enable_profiling: false
 
 # Fallback Configuration

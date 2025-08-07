@@ -7,7 +7,7 @@ import torch
 import numpy as np
 import os
 import time
-from typing import Dict, List, Tuple, Optional
+from typing import Dict, List, Tuple, Optional, Any
 from datetime import datetime
 from functools import wraps
 
@@ -19,6 +19,13 @@ from modules.linear_input_adapter import create_input_adapter
 from modules.orthogonal_encodings import create_class_encoder
 from modules.classification_loss import create_classification_loss
 from train.gradient_accumulator import create_gradient_accumulator, BatchController
+
+# Import diagnostic tools
+from utils.gradient_diagnostics import (
+    create_backward_pass_diagnostics, 
+    create_gradient_flow_analyzer, 
+    create_discrete_update_analyzer
+)
 
 # Import core components
 from core.node_store import NodeStore
@@ -86,6 +93,9 @@ class ModularTrainContext:
         self.current_epoch = 0
         self.training_losses = []
         self.validation_accuracies = []
+        
+        # Initialize diagnostic tools
+        self.setup_diagnostic_tools()
         
         print(f"\n✅ Modular training context initialized")
         print(f"   🎯 Mode: {self.config.mode.upper()}")
@@ -243,6 +253,9 @@ class ModularTrainContext:
                 total_nodes=self.config.get('architecture.total_nodes'),
                 num_input_nodes=self.config.get('architecture.input_nodes'),
                 num_output_nodes=self.config.get('architecture.output_nodes'),
+                vector_dim=self.config.get('architecture.vector_dim'),
+                phase_bins=self.config.get('resolution.phase_bins'),
+                mag_bins=self.config.get('resolution.mag_bins'),
                 cardinality=self.config.get('graph_structure.cardinality'),
                 seed=self.config.get('architecture.seed')
             )
@@ -274,6 +287,41 @@ class ModularTrainContext:
         print(f"   ✅ Graph structure initialized")
         print(f"      📊 Total nodes: {len(self.graph_df)}")
         print(f"      🔗 Average connections: {self.graph_df['input_connections'].apply(len).mean():.1f}")
+    
+    def setup_diagnostic_tools(self):
+        """Setup backward pass diagnostic tools."""
+        print(f"\n🔧 Setting up diagnostic tools...")
+        
+        # Check if diagnostics are enabled
+        diagnostics_enabled = self.config.get('diagnostics.enabled', True)
+        
+        if diagnostics_enabled:
+            # Initialize backward pass diagnostics
+            self.backward_pass_diagnostics = create_backward_pass_diagnostics(
+                config=self.config.config,
+                device=self.device
+            )
+            
+            # Initialize gradient flow analyzer
+            self.gradient_flow_analyzer = create_gradient_flow_analyzer(
+                self.backward_pass_diagnostics
+            )
+            
+            # Initialize discrete update analyzer
+            self.discrete_update_analyzer = create_discrete_update_analyzer(
+                self.backward_pass_diagnostics
+            )
+            
+            print(f"   ✅ Diagnostic tools initialized")
+            print(f"      🔍 Backward pass monitoring: enabled")
+            print(f"      📊 Gradient flow analysis: enabled")
+            print(f"      🔧 Discrete update analysis: enabled")
+        else:
+            self.backward_pass_diagnostics = None
+            self.gradient_flow_analyzer = None
+            self.discrete_update_analyzer = None
+            
+            print(f"   ⚠️  Diagnostic tools disabled")
     
     def forward_pass(self, input_context: Dict[int, Tuple[torch.Tensor, torch.Tensor]]) -> Dict[int, torch.Tensor]:
         """
@@ -427,6 +475,82 @@ class ModularTrainContext:
         
         return upstream_gradients
     
+    def backward_pass_with_diagnostics(self, loss: torch.Tensor, output_signals: Dict[int, torch.Tensor], target_label: int) -> Dict[int, Tuple[torch.Tensor, torch.Tensor]]:
+        """
+        Enhanced backward pass with comprehensive diagnostic monitoring.
+        
+        Args:
+            loss: Loss tensor
+            output_signals: Output node signals
+            target_label: Ground truth label
+            
+        Returns:
+            Node gradients: node_id -> (phase_grad, mag_grad)
+        """
+        # Step 1: Compute upstream gradients from loss function
+        upstream_gradients = self.compute_upstream_gradients(output_signals)
+        
+        # Monitor upstream gradients if diagnostics are enabled
+        if self.backward_pass_diagnostics is not None:
+            self.backward_pass_diagnostics.monitor_upstream_gradients(upstream_gradients)
+        
+        # Step 2: Compute discrete gradients for each output node
+        node_gradients = {}
+        
+        for node_id in self.output_nodes:
+            if node_id in output_signals and node_id in upstream_gradients:
+                # Get current discrete parameters
+                string_node_id = f"n{node_id}"  # Convert to string format for node_store
+                
+                if string_node_id in self.node_store.phase_table:
+                    current_phase_idx = self.node_store.phase_table[string_node_id]
+                    current_mag_idx = self.node_store.mag_table[string_node_id]
+                    upstream_grad = upstream_gradients[node_id]
+                    
+                    # Step 3: Compute continuous gradients using lookup tables
+                    phase_grad, mag_grad = self.lookup_tables.compute_signal_gradients(
+                        current_phase_idx, current_mag_idx, upstream_grad
+                    )
+                    
+                    node_gradients[node_id] = (phase_grad, mag_grad)
+        
+        # Monitor discrete gradient computation if diagnostics are enabled
+        if self.backward_pass_diagnostics is not None:
+            self.backward_pass_diagnostics.monitor_discrete_gradient_computation(node_gradients)
+        
+        # Analyze gradient flow patterns if gradient flow analyzer is available
+        if self.gradient_flow_analyzer is not None:
+            self.gradient_flow_analyzer.analyze_gradient_flow_pattern(node_gradients)
+        
+        # Store parameters before update for monitoring parameter changes
+        before_params = {}
+        if self.backward_pass_diagnostics is not None:
+            for node_id in node_gradients.keys():
+                string_node_id = f"n{node_id}"
+                if string_node_id in self.node_store.phase_table:
+                    before_params[string_node_id] = (
+                        self.node_store.phase_table[string_node_id].clone(),
+                        self.node_store.mag_table[string_node_id].clone()
+                    )
+        
+        # Apply parameter updates
+        updated_nodes = list(node_gradients.keys())
+        if updated_nodes:
+            # Apply direct updates (this will be monitored)
+            self.apply_direct_updates_with_diagnostics(node_gradients, before_params)
+        
+        # Monitor gradient accumulation if enabled
+        if self.backward_pass_diagnostics is not None and self.gradient_accumulator is not None:
+            self.backward_pass_diagnostics.monitor_gradient_accumulation(
+                self.gradient_accumulator, self.batch_controller
+            )
+        
+        # Finish backward pass monitoring
+        if self.backward_pass_diagnostics is not None:
+            self.backward_pass_diagnostics.finish_backward_pass_monitoring()
+        
+        return node_gradients
+    
     def apply_continuous_gradients(self, node_gradients: Dict[int, Tuple[torch.Tensor, torch.Tensor]]):
         """
         Apply continuous gradients as discrete parameter updates.
@@ -461,7 +585,7 @@ class ModularTrainContext:
     
     def train_single_sample(self, sample_idx: int) -> Tuple[float, float]:
         """
-        Train on a single sample.
+        Enhanced training on a single sample with comprehensive backward pass diagnostics.
         
         Args:
             sample_idx: Sample index
@@ -469,6 +593,10 @@ class ModularTrainContext:
         Returns:
             Tuple of (loss, accuracy)
         """
+        # Start backward pass monitoring if diagnostics are enabled
+        if self.backward_pass_diagnostics is not None:
+            self.backward_pass_diagnostics.start_backward_pass_monitoring(sample_idx, self.current_epoch)
+        
         # Get input context
         input_context, target_label = self.input_adapter.get_input_context(
             sample_idx, self.input_nodes
@@ -477,17 +605,40 @@ class ModularTrainContext:
         # Forward pass
         output_signals = self.forward_pass(input_context)
         
+        # Enhanced diagnostic monitoring
+        self._log_forward_pass_diagnostics(sample_idx)
+        
         if not output_signals:
+            if self.backward_pass_diagnostics is not None:
+                self.backward_pass_diagnostics.finish_backward_pass_monitoring()
             return 0.0, 0.0  # No output signals
         
         # Compute loss
         loss, logits = self.compute_loss(output_signals, target_label)
         
+        # Monitor loss computation if diagnostics are enabled
+        if self.backward_pass_diagnostics is not None:
+            class_encodings = self.class_encoder.get_all_encodings()
+            self.backward_pass_diagnostics.monitor_loss_computation(
+                output_signals, target_label, loss, logits, class_encodings
+            )
+        
         # Compute accuracy
         accuracy = self.loss_function.compute_accuracy(logits, torch.tensor(target_label, device=self.device))
         
-        # Backward pass
-        node_gradients = self.backward_pass(loss, output_signals)
+        # Enhanced backward pass with gradient clipping for input adapter
+        if hasattr(self.input_adapter, 'clip_gradients'):
+            # Clip gradients for enhanced input adapter to prevent exploding gradients
+            grad_norm = self.input_adapter.clip_gradients(max_norm=1.0)
+            
+            # Log gradient statistics periodically
+            if hasattr(self, '_gradient_stats'):
+                self._gradient_stats.append(grad_norm)
+            else:
+                self._gradient_stats = [grad_norm]
+        
+        # Backward pass for discrete components with diagnostic monitoring
+        node_gradients = self.backward_pass_with_diagnostics(loss, output_signals, target_label)
         
         # === [OPTIMIZED VECTORIZED BLOCK] ===
         # Vectorized intermediate node credit assignment using cosine alignment loss
@@ -689,6 +840,143 @@ class ModularTrainContext:
                 # Update node store using .data to avoid Parameter type issues
                 self.node_store.phase_table[string_node_id].data = new_phase_idx.detach()
                 self.node_store.mag_table[string_node_id].data = new_mag_idx.detach()
+    
+    def apply_direct_updates_with_diagnostics(self, node_gradients: Dict[int, Tuple[torch.Tensor, torch.Tensor]], 
+                                            before_params: Optional[Dict] = None):
+        """
+        Apply gradients directly with comprehensive diagnostic monitoring.
+        
+        Args:
+            node_gradients: Computed gradients for each node
+            before_params: Parameters before update for change monitoring
+        """
+        updated_nodes = []
+        
+        for node_id, (phase_grad, mag_grad) in node_gradients.items():
+            string_node_id = f"n{node_id}"  # Convert to string format for node_store
+            
+            if string_node_id in self.node_store.phase_table:
+                # Get current parameters
+                current_phase_idx = self.node_store.phase_table[string_node_id]
+                current_mag_idx = self.node_store.mag_table[string_node_id]
+                
+                # Convert continuous gradients to discrete updates using lookup tables
+                phase_updates, mag_updates = self.lookup_tables.quantize_gradients_to_discrete_updates(
+                    phase_grad, mag_grad, self.effective_lr
+                )
+                
+                # Apply updates with proper modular arithmetic
+                new_phase_idx, new_mag_idx = self.lookup_tables.apply_discrete_updates(
+                    current_phase_idx, current_mag_idx, phase_updates, mag_updates
+                )
+                
+                # Update node store using .data to avoid Parameter type issues
+                self.node_store.phase_table[string_node_id].data = new_phase_idx.detach()
+                self.node_store.mag_table[string_node_id].data = new_mag_idx.detach()
+                
+                updated_nodes.append(node_id)
+        
+        # Monitor parameter updates if diagnostics are enabled
+        if self.backward_pass_diagnostics is not None and updated_nodes:
+            self.backward_pass_diagnostics.monitor_parameter_updates(
+                self.node_store, updated_nodes, self.effective_lr, before_params
+            )
+        
+        # Analyze discrete update effectiveness if analyzer is available
+        if self.discrete_update_analyzer is not None and updated_nodes:
+            # Create discrete updates dict for analysis
+            discrete_updates = {}
+            for node_id in updated_nodes:
+                string_node_id = f"n{node_id}"
+                if string_node_id in self.node_store.phase_table and before_params and string_node_id in before_params:
+                    prev_phase, prev_mag = before_params[string_node_id]
+                    current_phase = self.node_store.phase_table[string_node_id]
+                    current_mag = self.node_store.mag_table[string_node_id]
+                    
+                    # Calculate discrete updates
+                    phase_update = current_phase - prev_phase
+                    mag_update = current_mag - prev_mag
+                    
+                    discrete_updates[node_id] = (phase_update, mag_update)
+            
+            if discrete_updates:
+                self.discrete_update_analyzer.analyze_discrete_update_effectiveness(
+                    node_gradients, discrete_updates, self.effective_lr
+                )
+    
+    def get_diagnostic_summary(self) -> Optional[Dict[str, Any]]:
+        """
+        Get comprehensive diagnostic summary from all diagnostic tools.
+        
+        Returns:
+            Dictionary with diagnostic summaries or None if diagnostics disabled
+        """
+        if self.backward_pass_diagnostics is None:
+            return None
+        
+        summary = {
+            'backward_pass_diagnostics': self.backward_pass_diagnostics.get_diagnostic_summary(),
+            'gradient_flow_analysis': None,
+            'discrete_update_analysis': None
+        }
+        
+        # Add gradient flow analysis if available
+        if self.gradient_flow_analyzer is not None:
+            summary['gradient_flow_analysis'] = self.gradient_flow_analyzer.get_flow_analysis_summary()
+        
+        # Add discrete update analysis if available
+        if self.discrete_update_analyzer is not None:
+            summary['discrete_update_analysis'] = self.discrete_update_analyzer.get_update_analysis_summary()
+        
+        return summary
+    
+    def print_diagnostic_report(self):
+        """Print comprehensive diagnostic report from all tools."""
+        if self.backward_pass_diagnostics is None:
+            print("📊 Diagnostics disabled - no report available")
+            return
+        
+        # Print main backward pass diagnostic report
+        self.backward_pass_diagnostics.print_diagnostic_report()
+        
+        # Print gradient flow analysis if available
+        if self.gradient_flow_analyzer is not None:
+            flow_summary = self.gradient_flow_analyzer.get_flow_analysis_summary()
+            if flow_summary:
+                print("\n" + "="*80)
+                print("📊 GRADIENT FLOW ANALYSIS")
+                print("="*80)
+                
+                for key, value in flow_summary.items():
+                    print(f"{key:30s}: {value}")
+        
+        # Print discrete update analysis if available
+        if self.discrete_update_analyzer is not None:
+            update_summary = self.discrete_update_analyzer.get_update_analysis_summary()
+            if update_summary:
+                print("\n" + "="*80)
+                print("🔧 DISCRETE UPDATE ANALYSIS")
+                print("="*80)
+                
+                for key, stats in update_summary.items():
+                    if isinstance(stats, dict):
+                        print(f"{key:30s}: {stats.get('mean', 0):.4f} ± {stats.get('std', 0):.4f}")
+                    else:
+                        print(f"{key:30s}: {stats}")
+    
+    def save_diagnostic_data(self, filepath: str):
+        """Save diagnostic data to file."""
+        if self.backward_pass_diagnostics is None:
+            print("⚠️  Diagnostics disabled - no data to save")
+            return
+        
+        # Create timestamped filename
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        base_path = filepath.replace('.json', f'_{timestamp}.json')
+        
+        self.backward_pass_diagnostics.save_diagnostic_data(base_path)
+        
+        print(f"💾 Diagnostic data saved to {base_path}")
     
     def train_epoch(self) -> Tuple[float, float]:
         """
@@ -1000,6 +1288,48 @@ class ModularTrainContext:
                         print(f"  {key:20s}: {value}")
             else:
                 print(f"  Status: {stats}")
+    
+    def _log_forward_pass_diagnostics(self, sample_idx: int):
+        """
+        Enhanced diagnostic logging for forward pass analysis.
+        
+        Args:
+            sample_idx: Current sample index
+        """
+        # Get forward engine performance stats
+        if hasattr(self.forward_engine, 'stats'):
+            stats = self.forward_engine.stats
+            
+            # Get the most recent forward pass data
+            if stats['forward_pass_times']:
+                last_forward_time = stats['forward_pass_times'][-1]
+                total_timesteps = stats['total_timesteps']
+                
+                # Calculate average timesteps per forward pass
+                avg_timesteps = total_timesteps / max(stats['total_forward_passes'], 1)
+                
+                print(f"      Sample {sample_idx}: Forward pass completed in {last_forward_time:.3f}s")
+                print(f"      └─ Timesteps: {avg_timesteps:.1f} avg, Total: {total_timesteps}")
+        
+        # Get final active nodes count
+        active_nodes = self.activation_table.get_active_nodes_at_last_timestep()
+        num_active = len(active_nodes)
+        print(f"      └─ Active nodes at final timestep: {num_active}")
+        
+        # If verbose logging is enabled, get more detailed stats
+        if self.config.get('forward_pass.verbose', False):
+            # Get activation table stats
+            if hasattr(self.activation_table, 'get_performance_stats'):
+                activation_stats = self.activation_table.get_performance_stats()
+                if 'total_activations' in activation_stats:
+                    print(f"      └─ Total activations processed: {activation_stats['total_activations']}")
+            
+            # Get active output nodes
+            active_output_nodes = self.forward_engine.get_active_output_nodes()
+            if active_output_nodes:
+                print(f"      └─ Active output nodes: {active_output_nodes}")
+            else:
+                print(f"      └─ No active output nodes detected")
 
 # Factory function
 def create_modular_train_context(config_path: str = "config/production.yaml") -> ModularTrainContext:
