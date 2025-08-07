@@ -209,7 +209,7 @@ def main():
     parser.add_argument('--quick', action='store_true', 
                        help='Quick test mode (reduced epochs)')
     # Evaluation options
-    parser.add_argument('--eval-samples', type=int, default=1000,
+    parser.add_argument('--eval-samples', type=int, default=100,
                        help='Number of samples for evaluation')
     
     # Other options

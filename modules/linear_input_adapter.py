@@ -1,6 +1,6 @@
 """
-Linear Input Adapter for Modular NeuroGraph
-Replaces PCA with learnable linear projection (784 → 200 nodes)
+Enhanced Linear Input Adapter for Modular NeuroGraph
+Deep neural network architecture with optimized quantization (784 → 1024 → 1024 → 2000)
 """
 
 import torch
@@ -8,38 +8,48 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torchvision import datasets, transforms
 import numpy as np
+import math
 from typing import Dict, Tuple, Optional
 from core.high_res_tables import QuantizationUtils
 
 class LinearInputAdapter(nn.Module):
     """
-    Learnable linear projection adapter for MNIST input processing.
+    Enhanced deep neural network input adapter for MNIST processing.
     
-    Features:
-    - Direct learnable projection: 784 → 200 nodes × 5 dims × 2 components
-    - High-resolution quantization (64 phase, 1024 magnitude bins)
-    - Layer normalization and dropout for regularization
-    - Efficient batch processing
-    - No PCA dependency
+    Architecture Improvements:
+    - 3-layer deep network: 784 → 1024 → 1024 → 2000
+    - Non-linear feature extraction with ReLU activations
+    - Layer normalization for stable training
+    - Dropout regularization to prevent overfitting
+    - Tanh output activation for bounded quantization
+    - Optimized quantization for [-1, 1] output range
+    - Gradient clipping support for training stability
+    
+    Performance Targets:
+    - 2x parameters: ~3.1M vs previous 1.57M
+    - Expected accuracy: 15-25% vs previous 11.5%
+    - Better feature extraction from pixel patterns
     """
     
-    def __init__(self, input_dim: int = 784, num_input_nodes: int = 200, 
-                 vector_dim: int = 5, phase_bins: int = 64, mag_bins: int = 1024,
+    def __init__(self, input_dim: int, num_input_nodes: int,
+                 vector_dim: int, phase_bins: int, mag_bins: int,
                  normalization: str = "layer_norm", dropout: float = 0.1, 
-                 learnable: bool = True, device: str = 'cpu'):
+                 learnable: bool = True, device: str = 'cpu',
+                 hidden_dims: list = [1024, 1024]):
         """
-        Initialize linear input adapter.
+        Initialize enhanced linear input adapter.
         
         Args:
             input_dim: Input dimension (784 for MNIST)
             num_input_nodes: Number of input nodes (200)
             vector_dim: Vector dimension per node (5)
-            phase_bins: Number of discrete phase bins (64)
-            mag_bins: Number of discrete magnitude bins (1024)
+            phase_bins: Number of discrete phase bins (32)
+            mag_bins: Number of discrete magnitude bins (512)
             normalization: Normalization type ("layer_norm", "batch_norm", or None)
             dropout: Dropout probability for regularization
             learnable: Whether projection is learnable or fixed
             device: Computation device
+            hidden_dims: Hidden layer dimensions for deep architecture
         """
         super().__init__()
         
@@ -50,49 +60,99 @@ class LinearInputAdapter(nn.Module):
         self.mag_bins = mag_bins
         self.device = device
         self.learnable = learnable
+        self.hidden_dims = hidden_dims
         
         # Calculate output dimension: nodes × vector_dim × 2 (phase + magnitude)
         self.output_dim = num_input_nodes * vector_dim * 2
         
-        print(f"🔧 Initializing Linear Input Adapter:")
+        print(f"🚀 Initializing Enhanced Linear Input Adapter:")
         print(f"   📊 Input dimension: {input_dim}")
+        print(f"   🏗️  Architecture: {input_dim} → {' → '.join(map(str, hidden_dims))} → {self.output_dim}")
         print(f"   🎯 Output nodes: {num_input_nodes}")
         print(f"   📐 Vector dimension: {vector_dim}")
         print(f"   📈 Total output dimension: {self.output_dim}")
         print(f"   🧠 Learnable: {learnable}")
         print(f"   📊 Resolution: {phase_bins}×{mag_bins}")
         
-        # Linear projection layer
+        # Enhanced deep neural network architecture
         if learnable:
-            self.projection = nn.Linear(input_dim, self.output_dim)
-            # Initialize with Xavier/Glorot initialization
-            nn.init.xavier_uniform_(self.projection.weight)
-            nn.init.zeros_(self.projection.bias)
+            self.projection = self._build_enhanced_network(
+                input_dim, hidden_dims, self.output_dim, normalization, dropout
+            )
         else:
-            # Fixed random projection
+            # Fixed random projection (fallback)
             projection_matrix = torch.randn(input_dim, self.output_dim) * 0.1
             self.register_buffer('fixed_projection', projection_matrix)
             bias = torch.zeros(self.output_dim)
             self.register_buffer('fixed_bias', bias)
         
-        # Normalization layer
-        if normalization == "layer_norm":
-            self.norm = nn.LayerNorm(self.output_dim)
-        elif normalization == "batch_norm":
-            self.norm = nn.BatchNorm1d(self.output_dim)
-        else:
-            self.norm = nn.Identity()
-        
-        # Dropout for regularization
-        self.dropout = nn.Dropout(dropout) if dropout > 0 else nn.Identity()
-        
         # Load MNIST dataset
         self.setup_dataset()
         
-        # Quantization utilities
+        # Enhanced quantization utilities
         self.quantizer = QuantizationUtils()
         
-        print(f"✅ Linear input adapter initialized")
+        # Calculate and report parameter count
+        if learnable:
+            param_count = sum(p.numel() for p in self.parameters() if p.requires_grad)
+            print(f"   🔢 Parameters: {param_count:,} ({param_count/1e6:.2f}M)")
+            print(f"   📈 Parameter increase: {param_count/1570000:.1f}x vs original")
+        
+        print(f"✅ Enhanced input adapter initialized")
+    
+    def _build_enhanced_network(self, input_dim: int, hidden_dims: list, output_dim: int,
+                               normalization: str, dropout: float) -> nn.Module:
+        """
+        Build enhanced deep neural network architecture.
+        
+        Args:
+            input_dim: Input dimension
+            hidden_dims: List of hidden layer dimensions
+            output_dim: Output dimension
+            normalization: Normalization type
+            dropout: Dropout probability
+            
+        Returns:
+            Sequential network with enhanced architecture
+        """
+        layers = []
+        prev_dim = input_dim
+        
+        # Build hidden layers
+        for i, hidden_dim in enumerate(hidden_dims):
+            # Linear layer
+            linear = nn.Linear(prev_dim, hidden_dim)
+            # Enhanced initialization for deeper networks
+            nn.init.xavier_uniform_(linear.weight, gain=nn.init.calculate_gain('relu'))
+            nn.init.zeros_(linear.bias)
+            layers.append(linear)
+            
+            # Activation
+            layers.append(nn.ReLU(inplace=True))
+            
+            # Normalization
+            if normalization == "layer_norm":
+                layers.append(nn.LayerNorm(hidden_dim))
+            elif normalization == "batch_norm":
+                layers.append(nn.BatchNorm1d(hidden_dim))
+            
+            # Dropout (not on last hidden layer)
+            if dropout > 0 and i < len(hidden_dims) - 1:
+                layers.append(nn.Dropout(dropout))
+            
+            prev_dim = hidden_dim
+        
+        # Output layer with Tanh activation for bounded output
+        output_linear = nn.Linear(prev_dim, output_dim)
+        # Smaller initialization for output layer
+        nn.init.xavier_uniform_(output_linear.weight, gain=0.5)
+        nn.init.zeros_(output_linear.bias)
+        layers.append(output_linear)
+        
+        # Tanh activation for bounded output [-1, 1]
+        layers.append(nn.Tanh())
+        
+        return nn.Sequential(*layers)
     
     def setup_dataset(self):
         """Setup MNIST dataset with proper transforms."""
@@ -110,28 +170,27 @@ class LinearInputAdapter(nn.Module):
     
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """
-        Forward pass through linear projection.
+        Enhanced forward pass through deep neural network.
         
         Args:
             x: Input tensor of shape [batch_size, input_dim] or [input_dim]
             
         Returns:
             Projected tensor of shape [batch_size, output_dim] or [output_dim]
+            Output is bounded in [-1, 1] due to Tanh activation
         """
         # Handle single sample input
         single_sample = x.dim() == 1
         if single_sample:
             x = x.unsqueeze(0)
         
-        # Apply projection
+        # Apply enhanced projection network
         if self.learnable:
             projected = self.projection(x)
         else:
+            # Fallback to fixed projection
             projected = F.linear(x, self.fixed_projection.t(), self.fixed_bias)
-        
-        # Apply normalization and dropout
-        projected = self.norm(projected)
-        projected = self.dropout(projected)
+            projected = torch.tanh(projected)  # Apply tanh for consistency
         
         # Return to original shape if single sample
         if single_sample:
@@ -141,10 +200,15 @@ class LinearInputAdapter(nn.Module):
     
     def quantize_to_phase_mag(self, projected: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
         """
-        Quantize projected values to discrete phase-magnitude indices.
+        Enhanced quantization optimized for Tanh output range [-1, 1].
+        
+        This method implements the core quantization process:
+        1. Split network output into phase and magnitude components
+        2. Map bounded values to appropriate discrete ranges
+        3. Apply optimized quantization for each component type
         
         Args:
-            projected: Projected tensor of shape [output_dim]
+            projected: Projected tensor of shape [output_dim] with values in [-1, 1]
             
         Returns:
             Tuple of (phase_indices, mag_indices) each of shape [num_nodes, vector_dim]
@@ -153,23 +217,75 @@ class LinearInputAdapter(nn.Module):
         reshaped = projected.view(self.num_input_nodes, self.vector_dim, 2)
         
         # Split into phase and magnitude components
-        phase_continuous = reshaped[:, :, 0]  # [num_nodes, vector_dim]
-        mag_continuous = reshaped[:, :, 1]    # [num_nodes, vector_dim]
+        phase_continuous = reshaped[:, :, 0]  # [num_nodes, vector_dim] - Component 0
+        mag_continuous = reshaped[:, :, 1]    # [num_nodes, vector_dim] - Component 1
         
-        # Quantize using adaptive methods
-        phase_indices = self.quantizer.adaptive_quantize_phase(
-            phase_continuous.flatten(), self.phase_bins
-        ).view(self.num_input_nodes, self.vector_dim)
-        
-        mag_indices = self.quantizer.adaptive_quantize_magnitude(
-            mag_continuous.flatten(), self.mag_bins
-        ).view(self.num_input_nodes, self.vector_dim)
+        # Enhanced quantization for Tanh output [-1, 1]
+        phase_indices = self._quantize_phase_enhanced(phase_continuous)
+        mag_indices = self._quantize_magnitude_enhanced(mag_continuous)
         
         return phase_indices, mag_indices
     
+    def _quantize_phase_enhanced(self, phase_continuous: torch.Tensor) -> torch.Tensor:
+        """
+        Enhanced phase quantization optimized for [-1, 1] input range.
+        
+        Phase represents the "direction" or "angle" of the signal.
+        Maps [-1, 1] → [0, 2π] → [0, phase_bins-1]
+        
+        Args:
+            phase_continuous: Continuous phase values in [-1, 1]
+            
+        Returns:
+            Discrete phase indices in [0, phase_bins-1]
+        """
+        # Map [-1, 1] to [0, 1]
+        phase_normalized = (phase_continuous + 1.0) / 2.0
+        
+        # Map [0, 1] to [0, 2π]
+        phase_radians = phase_normalized * 2 * math.pi
+        
+        # Quantize to discrete bins [0, phase_bins-1]
+        phase_indices = torch.floor(
+            phase_radians / (2 * math.pi) * self.phase_bins
+        ).long()
+        
+        # Clamp to valid range
+        phase_indices = torch.clamp(phase_indices, 0, self.phase_bins - 1)
+        
+        return phase_indices
+    
+    def _quantize_magnitude_enhanced(self, mag_continuous: torch.Tensor) -> torch.Tensor:
+        """
+        Enhanced magnitude quantization optimized for [-1, 1] input range.
+        
+        Magnitude represents the "strength" or "amplitude" of the signal.
+        Maps [-1, 1] → [-3, 3] → [0, 1] → [0, mag_bins-1]
+        Uses expanded range for better dynamic range in exponential space.
+        
+        Args:
+            mag_continuous: Continuous magnitude values in [-1, 1]
+            
+        Returns:
+            Discrete magnitude indices in [0, mag_bins-1]
+        """
+        # Map [-1, 1] to [-3, 3] for expanded dynamic range
+        mag_scaled = mag_continuous * 3.0
+        
+        # Map [-3, 3] to [0, 1]
+        mag_normalized = (mag_scaled + 3.0) / 6.0
+        
+        # Quantize to discrete bins [0, mag_bins-1]
+        mag_indices = torch.floor(mag_normalized * self.mag_bins).long()
+        
+        # Clamp to valid range
+        mag_indices = torch.clamp(mag_indices, 0, self.mag_bins - 1)
+        
+        return mag_indices
+    
     def get_input_context(self, idx: int, input_node_ids: list) -> Tuple[Dict[int, Tuple[torch.Tensor, torch.Tensor]], int]:
         """
-        Get input context for a specific MNIST sample.
+        Get input context for a specific MNIST sample using enhanced processing.
         
         Args:
             idx: Sample index
@@ -187,11 +303,11 @@ class LinearInputAdapter(nn.Module):
         image, label = self.mnist[idx]
         image = image.to(self.device)
         
-        # Forward pass through projection
+        # Forward pass through enhanced projection network
         with torch.no_grad() if not self.training else torch.enable_grad():
             projected = self.forward(image)
         
-        # Quantize to phase-magnitude indices
+        # Enhanced quantization to phase-magnitude indices
         phase_indices, mag_indices = self.quantize_to_phase_mag(projected)
         
         # Create input context dictionary
@@ -209,7 +325,7 @@ class LinearInputAdapter(nn.Module):
     
     def get_batch_input_contexts(self, indices: list, input_node_ids: list) -> Tuple[list, list]:
         """
-        Get input contexts for a batch of samples.
+        Get input contexts for a batch of samples using enhanced processing.
         
         Args:
             indices: List of sample indices
@@ -229,7 +345,9 @@ class LinearInputAdapter(nn.Module):
         return input_contexts, labels
     
     def get_dataset_info(self) -> Dict[str, any]:
-        """Get information about the dataset and adapter."""
+        """Get information about the dataset and enhanced adapter."""
+        param_count = sum(p.numel() for p in self.parameters() if p.requires_grad) if self.learnable else 0
+        
         return {
             'dataset_size': len(self.mnist),
             'input_dim': self.input_dim,
@@ -239,33 +357,90 @@ class LinearInputAdapter(nn.Module):
             'phase_bins': self.phase_bins,
             'mag_bins': self.mag_bins,
             'learnable': self.learnable,
-            'parameters': sum(p.numel() for p in self.parameters() if p.requires_grad),
-            'capacity_vs_pca': self.output_dim / 50  # vs previous PCA 50 dims
+            'parameters': param_count,
+            'architecture': f"{self.input_dim} → {' → '.join(map(str, self.hidden_dims))} → {self.output_dim}",
+            'parameter_increase': param_count / 1570000 if param_count > 0 else 0,
+            'enhanced_features': [
+                'Deep 3-layer architecture',
+                'ReLU non-linear activations', 
+                'Layer normalization',
+                'Dropout regularization',
+                'Tanh bounded output',
+                'Optimized quantization'
+            ]
         }
     
     def get_projection_stats(self) -> Dict[str, float]:
-        """Get statistics about the learned projection."""
+        """Get statistics about the enhanced projection network."""
         if not self.learnable:
             return {'message': 'Fixed projection - no learnable parameters'}
         
-        weight = self.projection.weight
-        bias = self.projection.bias
+        stats = {}
         
-        stats = {
-            'weight_mean': weight.mean().item(),
-            'weight_std': weight.std().item(),
-            'weight_min': weight.min().item(),
-            'weight_max': weight.max().item(),
-            'bias_mean': bias.mean().item(),
-            'bias_std': bias.std().item(),
-            'weight_norm': torch.norm(weight).item(),
-            'condition_number': torch.linalg.cond(weight).item()
-        }
+        # Analyze each layer in the network
+        for i, layer in enumerate(self.projection):
+            if isinstance(layer, nn.Linear):
+                layer_name = f'layer_{i//4 + 1}' if i < len(self.projection) - 2 else 'output'
+                weight = layer.weight
+                bias = layer.bias
+                
+                stats[f'{layer_name}_weight_mean'] = weight.mean().item()
+                stats[f'{layer_name}_weight_std'] = weight.std().item()
+                stats[f'{layer_name}_weight_norm'] = torch.norm(weight).item()
+                stats[f'{layer_name}_bias_mean'] = bias.mean().item()
+                stats[f'{layer_name}_bias_std'] = bias.std().item()
+        
+        # Overall network statistics
+        all_params = torch.cat([p.flatten() for p in self.parameters() if p.requires_grad])
+        stats['total_param_mean'] = all_params.mean().item()
+        stats['total_param_std'] = all_params.std().item()
+        stats['total_param_norm'] = torch.norm(all_params).item()
+        stats['total_parameters'] = len(all_params)
         
         return stats
     
-    def visualize_projection_patterns(self, save_path: str = "logs/modular/projection_patterns.png"):
-        """Visualize learned projection patterns."""
+    def get_gradient_stats(self) -> Dict[str, float]:
+        """Get gradient statistics for monitoring training."""
+        if not self.learnable:
+            return {'message': 'Fixed projection - no gradients'}
+        
+        stats = {}
+        total_grad_norm = 0.0
+        
+        for i, layer in enumerate(self.projection):
+            if isinstance(layer, nn.Linear) and layer.weight.grad is not None:
+                layer_name = f'layer_{i//4 + 1}' if i < len(self.projection) - 2 else 'output'
+                
+                weight_grad_norm = torch.norm(layer.weight.grad).item()
+                bias_grad_norm = torch.norm(layer.bias.grad).item()
+                
+                stats[f'{layer_name}_weight_grad_norm'] = weight_grad_norm
+                stats[f'{layer_name}_bias_grad_norm'] = bias_grad_norm
+                
+                total_grad_norm += weight_grad_norm + bias_grad_norm
+        
+        stats['total_grad_norm'] = total_grad_norm
+        return stats
+    
+    def clip_gradients(self, max_norm: float) -> float:
+        """
+        Clip gradients to prevent exploding gradients in deep network.
+        
+        Args:
+            max_norm: Maximum gradient norm
+            
+        Returns:
+            Actual gradient norm before clipping
+        """
+        if not self.learnable:
+            return 0.0
+        
+        # Compute gradient norm
+        total_norm = torch.nn.utils.clip_grad_norm_(self.parameters(), max_norm)
+        return total_norm.item()
+    
+    def visualize_projection_patterns(self, save_path: str = "logs/enhanced/projection_patterns.png"):
+        """Visualize learned projection patterns from enhanced network."""
         if not self.learnable:
             print("⚠️  Cannot visualize fixed projection patterns")
             return
@@ -275,38 +450,45 @@ class LinearInputAdapter(nn.Module):
         
         os.makedirs(os.path.dirname(save_path), exist_ok=True)
         
-        # Get projection weights
-        weights = self.projection.weight.detach().cpu().numpy()  # [output_dim, input_dim]
+        # Get first layer weights (most interpretable)
+        first_layer = None
+        for layer in self.projection:
+            if isinstance(layer, nn.Linear):
+                first_layer = layer
+                break
         
-        # Reshape input weights to image format for visualization
-        # Take first few output dimensions
-        num_patterns = min(16, self.num_input_nodes)
-        patterns_per_node = self.vector_dim * 2  # phase + magnitude
+        if first_layer is None:
+            print("⚠️  No linear layers found for visualization")
+            return
+        
+        weights = first_layer.weight.detach().cpu().numpy()  # [1024, 784]
+        
+        # Visualize first 16 hidden units
+        num_patterns = min(16, weights.shape[0])
         
         fig, axes = plt.subplots(4, 4, figsize=(12, 12))
         axes = axes.flatten()
         
         for i in range(num_patterns):
-            # Get weights for this output node (average across vector dimensions)
-            start_idx = i * patterns_per_node
-            end_idx = start_idx + patterns_per_node
-            node_weights = weights[start_idx:end_idx].mean(axis=0)  # [input_dim]
+            # Get weights for this hidden unit
+            unit_weights = weights[i]  # [784]
             
             # Reshape to 28x28 image
-            pattern = node_weights.reshape(28, 28)
+            pattern = unit_weights.reshape(28, 28)
             
             axes[i].imshow(pattern, cmap='RdBu', vmin=-pattern.std(), vmax=pattern.std())
-            axes[i].set_title(f'Node {i}')
+            axes[i].set_title(f'Hidden Unit {i}')
             axes[i].axis('off')
         
+        plt.suptitle('Enhanced Input Adapter - First Layer Feature Detectors')
         plt.tight_layout()
         plt.savefig(save_path, dpi=300, bbox_inches='tight')
         plt.close()
         
-        print(f"📊 Projection patterns saved to {save_path}")
+        print(f"📊 Enhanced projection patterns saved to {save_path}")
     
     def save_adapter(self, filepath: str):
-        """Save adapter state."""
+        """Save enhanced adapter state."""
         torch.save({
             'state_dict': self.state_dict(),
             'config': {
@@ -315,19 +497,21 @@ class LinearInputAdapter(nn.Module):
                 'vector_dim': self.vector_dim,
                 'phase_bins': self.phase_bins,
                 'mag_bins': self.mag_bins,
-                'learnable': self.learnable
+                'learnable': self.learnable,
+                'hidden_dims': self.hidden_dims,
+                'architecture_type': 'enhanced_deep'
             }
         }, filepath)
-        print(f"💾 Linear adapter saved to {filepath}")
+        print(f"💾 Enhanced adapter saved to {filepath}")
     
     def load_adapter(self, filepath: str):
-        """Load adapter state."""
+        """Load enhanced adapter state."""
         checkpoint = torch.load(filepath, map_location=self.device)
         self.load_state_dict(checkpoint['state_dict'])
-        print(f"📂 Linear adapter loaded from {filepath}")
+        print(f"📂 Enhanced adapter loaded from {filepath}")
 
 class FixedLinearInputAdapter(LinearInputAdapter):
-    """Fixed (non-learnable) linear input adapter for comparison."""
+    """Fixed (non-learnable) input adapter for comparison."""
     
     def __init__(self, **kwargs):
         """Initialize with learnable=False."""
@@ -335,10 +519,10 @@ class FixedLinearInputAdapter(LinearInputAdapter):
         super().__init__(**kwargs)
 
 class AdaptiveLinearInputAdapter(LinearInputAdapter):
-    """Adaptive linear input adapter with dynamic quantization."""
+    """Adaptive input adapter with dynamic quantization statistics."""
     
     def __init__(self, **kwargs):
-        """Initialize adaptive adapter."""
+        """Initialize adaptive adapter with running statistics."""
         super().__init__(**kwargs)
         
         # Track statistics for adaptive quantization
@@ -387,27 +571,22 @@ class AdaptiveLinearInputAdapter(LinearInputAdapter):
             phase_normalized = phase_continuous
             mag_normalized = mag_continuous
         
-        # Quantize
-        phase_indices = self.quantizer.adaptive_quantize_phase(
-            phase_normalized.flatten(), self.phase_bins
-        ).view(self.num_input_nodes, self.vector_dim)
-        
-        mag_indices = self.quantizer.adaptive_quantize_magnitude(
-            mag_normalized.flatten(), self.mag_bins
-        ).view(self.num_input_nodes, self.vector_dim)
+        # Apply enhanced quantization
+        phase_indices = self._quantize_phase_enhanced(phase_normalized)
+        mag_indices = self._quantize_magnitude_enhanced(mag_normalized)
         
         return phase_indices, mag_indices
 
 def create_input_adapter(adapter_type: str = "linear", **kwargs) -> LinearInputAdapter:
     """
-    Factory function to create input adapters.
+    Factory function to create enhanced input adapters.
     
     Args:
         adapter_type: Type of adapter ("linear", "fixed", "adaptive")
         **kwargs: Additional arguments for adapter
         
     Returns:
-        Input adapter instance
+        Enhanced input adapter instance
     """
     if adapter_type == "linear":
         return LinearInputAdapter(**kwargs)

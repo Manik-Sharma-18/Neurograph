@@ -8,6 +8,7 @@ import torch.nn.functional as F
 from typing import Dict, List, Tuple, Optional, Set
 import pandas as pd
 import time
+from collections import deque
 
 from core.activation_table import VectorizedActivationTable
 from core.vectorized_propagation import VectorizedPropagationEngine
@@ -15,14 +16,185 @@ from core.node_store import NodeStore
 from core.modular_cell import ModularPhaseCell
 
 
+def bfs_to_outputs(adjacency, start_node, output_nodes):
+    """
+    BFS to find shortest path to ANY output and track which outputs are reachable.
+    Returns (min_hops, set_of_reachable_outputs)
+    """
+    if start_node in output_nodes:
+        return 0, {start_node}
+    
+    queue = deque([(start_node, 0)])
+    visited = {start_node}
+    reachable_outputs = set()
+    min_hops = float('inf')
+    
+    while queue:
+        current_node, distance = queue.popleft()
+        
+        # Check all neighbors
+        for neighbor in adjacency.get(current_node, []):
+            if neighbor in output_nodes:
+                reachable_outputs.add(neighbor)
+                min_hops = min(min_hops, distance + 1)
+            
+            if neighbor not in visited:
+                visited.add(neighbor)
+                queue.append((neighbor, distance + 1))
+    
+    return min_hops, reachable_outputs
+
+
+def validate_input_output_paths(adjacency, input_nodes, output_nodes):
+    """
+    Enhanced connectivity validation with average hops and detailed diagnostics.
+    """
+    print(f"🔍 Analyzing graph connectivity:")
+    print(f"   📊 Input nodes: {len(input_nodes)}")
+    print(f"   📊 Output nodes: {len(output_nodes)}")
+    
+    connected_inputs = 0
+    reachable_outputs = set()
+    min_hops = float('inf')
+    all_hop_counts = []
+    connectivity_details = []
+    direct_connections = []
+    
+    # Test each input node
+    for input_node in input_nodes:
+        hops, reached_outputs = bfs_to_outputs(adjacency, input_node, output_nodes)
+        
+        if hops < float('inf'):
+            connected_inputs += 1
+            reachable_outputs.update(reached_outputs)
+            min_hops = min(min_hops, hops)
+            all_hop_counts.append(hops)
+            
+            # Track direct connections (suspicious)
+            if hops == 1:
+                for output in reached_outputs:
+                    direct_connections.append((input_node, output))
+            
+            connectivity_details.append({
+                'input': input_node,
+                'min_hops': hops,
+                'reachable_outputs': len(reached_outputs)
+            })
+    
+    # Calculate statistics
+    input_connectivity_rate = connected_inputs / len(input_nodes) if input_nodes else 0
+    output_reachability_rate = len(reachable_outputs) / len(output_nodes) if output_nodes else 0
+    
+    # Calculate average hops
+    avg_hops = sum(all_hop_counts) / len(all_hop_counts) if all_hop_counts else 8.0
+    
+    print(f"   ✅ Connected inputs: {connected_inputs}/{len(input_nodes)} ({input_connectivity_rate:.1%})")
+    print(f"   ✅ Reachable outputs: {len(reachable_outputs)}/{len(output_nodes)} ({output_reachability_rate:.1%})")
+    
+    # Path analysis
+    if all_hop_counts:
+        from collections import Counter
+        hop_distribution = Counter(all_hop_counts)
+        print(f"   📊 Path Analysis:")
+        print(f"      • Total valid paths: {len(all_hop_counts)}")
+        print(f"      • Average hops: {avg_hops:.2f}")
+        print(f"      • Min hops: {min_hops}")
+        print(f"      • Max hops: {max(all_hop_counts)}")
+        print(f"      • Hop distribution: {dict(hop_distribution)}")
+    
+    # Check for suspicious direct connections
+    if direct_connections:
+        print(f"   🔗 Direct input→output connections: {len(direct_connections)}")
+        print(f"      Examples: {direct_connections[:5]}")
+        if len(direct_connections) > 50:
+            print(f"   ⚠️  WARNING: Unusually high number of direct connections!")
+    
+    # Warnings for connectivity issues
+    if input_connectivity_rate < 0.8:
+        print(f"   ⚠️  WARNING: Only {input_connectivity_rate:.1%} of input nodes can reach outputs")
+        print(f"   💡 This may indicate graph connectivity issues")
+    
+    if output_reachability_rate < 0.8:
+        print(f"   ⚠️  WARNING: Only {output_reachability_rate:.1%} of output nodes are reachable")
+        print(f"   💡 Some outputs may never activate through static paths")
+    
+    if min_hops == float('inf'):
+        print(f"   🚨 CRITICAL: No paths found from inputs to outputs!")
+        print(f"   💡 Using fallback minimum timesteps (10)")
+        min_hops = 8  # fallback - 2 = 10 total timesteps
+        avg_hops = 8.0
+    else:
+        print(f"   🔗 Minimum input→output hops: {min_hops}")
+        print(f"   📈 Average input→output hops: {avg_hops:.2f}")
+    
+    return {
+        'min_hops': min_hops,
+        'avg_hops': avg_hops,
+        'connected_inputs': connected_inputs,
+        'input_connectivity_rate': input_connectivity_rate,
+        'reachable_outputs': len(reachable_outputs),
+        'output_reachability_rate': output_reachability_rate,
+        'connectivity_details': connectivity_details,
+        'direct_connections': direct_connections,
+        'hop_distribution': dict(Counter(all_hop_counts)) if all_hop_counts else {}
+    }
+
+
+def analyze_graph_connectivity(graph_df):
+    """
+    Comprehensive graph analysis with validation and diagnostics.
+    Returns connectivity metrics and minimum timesteps.
+    """
+    # Build graph structures
+    adjacency = {}  # forward adjacency: node -> [targets]
+    reverse_adjacency = {}  # reverse: node -> [sources]
+    input_nodes = set()
+    output_nodes = set()
+    
+    for _, row in graph_df.iterrows():
+        node_id = row['node_id']
+        connections = row['input_connections']
+        
+        if row.get('is_input', False):
+            input_nodes.add(node_id)
+        if row.get('is_output', False):
+            output_nodes.add(node_id)
+        
+        # Build adjacencies
+        for source in connections:
+            # Forward: source -> node_id
+            if source not in adjacency:
+                adjacency[source] = []
+            adjacency[source].append(node_id)
+            
+            # Reverse: node_id <- source
+            if node_id not in reverse_adjacency:
+                reverse_adjacency[node_id] = []
+            reverse_adjacency[node_id].append(source)
+    
+    # Connectivity validation
+    connectivity_results = validate_input_output_paths(
+        adjacency, input_nodes, output_nodes
+    )
+    
+    return {
+        'adjacency': adjacency,
+        'input_nodes': input_nodes,
+        'output_nodes': output_nodes,
+        'connectivity': connectivity_results
+    }
+
+
 class VectorizedForwardEngine:
     """
-    GPU-first forward engine with complete vectorization.
+    GPU-first forward engine with complete vectorization and graph connectivity analysis.
     
     Key optimizations:
     - Vectorized activation table with GPU tensors
     - Batch propagation processing
     - Parallel timestep computation
+    - Graph topology-aware termination logic
+    - Output node exclusion from radiation
     - Elimination of Python loops and CPU bottlenecks
     - Direct GPU memory operations
     """
@@ -96,6 +268,23 @@ class VectorizedForwardEngine:
         # Extract output nodes
         self.output_nodes = set(node_store.output_nodes) if hasattr(node_store, 'output_nodes') else set()
         
+        # Comprehensive graph analysis
+        print(f"🔧 Analyzing graph topology...")
+        self.graph_analysis = analyze_graph_connectivity(graph_df)
+        
+        # Calculate minimum timesteps based on graph topology using average hops
+        min_hops = self.graph_analysis['connectivity']['min_hops']
+        avg_hops = self.graph_analysis['connectivity']['avg_hops']
+        self.min_required_timesteps = max(int(avg_hops) + 2, 5)  # At least 5 timesteps
+        
+        print(f"📊 Forward engine configuration:")
+        print(f"   🔗 Minimum hops: {min_hops}")
+        print(f"   📈 Average hops: {avg_hops:.2f}")
+        print(f"   ⏱️ Minimum timesteps: {self.min_required_timesteps} (based on avg hops)")
+        
+        # Pre-create output node indices for propagation engine
+        self._init_output_node_indices()
+        
         # Initialize vectorized components
         self._init_vectorized_components()
         
@@ -117,6 +306,30 @@ class VectorizedForwardEngine:
         print(f"   🎯 Output nodes: {len(self.output_nodes)}")
         print(f"   ⚡ GPU memory allocated: {self._estimate_total_memory():.2f} MB")
     
+    def _init_output_node_indices(self):
+        """Initialize output node indices tensor for propagation engine."""
+        # Create a temporary propagation engine to get node mappings
+        temp_propagation_engine = VectorizedPropagationEngine(
+            graph_df=self.graph_df,
+            node_store=self.node_store,
+            phase_cell=self.phase_cell,
+            max_nodes=self.max_nodes,
+            device=self.device
+        )
+        
+        # Create output node indices tensor
+        self.output_node_indices = torch.tensor([
+            temp_propagation_engine.node_to_index.get(node_id, -1)
+            for node_id in self.output_nodes
+            if node_id in temp_propagation_engine.node_to_index
+        ], dtype=torch.long, device=self.device)
+        
+        # Filter out invalid indices
+        valid_mask = self.output_node_indices >= 0
+        self.output_node_indices = self.output_node_indices[valid_mask]
+        
+        print(f"   🚫 Outputs excluded from radiation: {len(self.output_node_indices)}")
+    
     def _init_vectorized_components(self):
         """Initialize all vectorized components."""
         # Vectorized activation table
@@ -130,7 +343,7 @@ class VectorizedForwardEngine:
             device=self.device
         )
         
-        # Vectorized propagation engine
+        # Vectorized propagation engine (output exclusion removed)
         self.propagation_engine = VectorizedPropagationEngine(
             graph_df=self.graph_df,
             node_store=self.node_store,
@@ -242,19 +455,47 @@ class VectorizedForwardEngine:
             if self.verbose:
                 print(f"\n⏱️ Timestep {timestep}")
                 print(f"   🔹 Active nodes: {len(active_indices)}")
+                
+                # ENHANCED DIAGNOSTICS
+                output_diagnostics = self._detailed_output_diagnostics(active_indices)
+                print(f"   🎯 Output diagnostics: {output_diagnostics}")
+                
+                # Check signal strengths reaching outputs
+                output_signals = self._get_output_signal_strengths()
+                print(f"   💪 Output signal strengths: {output_signals}")
+                
+                # Check if termination condition would trigger
+                termination_ready = (timestep >= self.min_required_timesteps)
+                print(f"   ⏰ Termination ready: {termination_ready} (min: {self.min_required_timesteps})")
+                print(f"   🔍 Output active mask: {output_active.tolist()}")
+                
                 if output_active.any():
                     active_output_indices = self.output_node_indices[output_active]
                     active_output_nodes = [
                         self.propagation_engine.index_to_node.get(idx.item(), f"idx_{idx}")
                         for idx in active_output_indices
                     ]
-                    print(f"   🎯 Active outputs: {active_output_nodes}")
+                    print(f"   ✅ Active outputs detected: {active_output_nodes}")
             
-            # Check termination condition
-            if (timestep >= self.min_output_activation_timesteps and output_active.any()):
+            # Enhanced termination with graph topology awareness
+            if (timestep >= self.min_required_timesteps and output_active.any()):
                 if self.verbose:
                     print(f"✅ Output activation detected at timestep {timestep}")
+                    print(f"   📊 Required minimum: {self.min_required_timesteps} (graph depth + 2)")
+                    active_output_nodes = [
+                        self.propagation_engine.index_to_node.get(idx.item(), f"idx_{idx}")
+                        for idx in self.output_node_indices[output_active]
+                    ]
+                    print(f"   🎯 Active outputs: {active_output_nodes}")
                 self.stats['early_terminations'] += 1
+                break
+            
+            # Additional safety check for very long runs
+            if timestep >= self.max_timesteps - 1:
+                if self.verbose:
+                    print(f"⏰ Maximum timesteps reached ({self.max_timesteps})")
+                    if not output_active.any():
+                        print(f"   ⚠️  No output activation achieved")
                 break
             
             # Vectorized propagation step
@@ -267,15 +508,15 @@ class VectorizedForwardEngine:
                 radiation_batch_size=self.radiation_batch_size
             )
             
-            # Clear previous activations (overwrite style)
-            self.activation_table.clear()
+            # CRITICAL FIX: Remove the destructive clear() call
+            # self.activation_table.clear()  # REMOVED - was destroying activations!
             
-            # Batch inject new activations
+            # Batch inject new activations (accumulative)
             if len(target_indices) > 0:
                 self._inject_propagation_results_batch(target_indices, new_phases, new_mags, strengths)
             
-            # Vectorized decay and prune
-            self.activation_table.decay_and_prune_vectorized()
+            # Enhanced vectorized decay and prune with output protection
+            self.activation_table.decay_and_prune_vectorized(output_nodes=self.output_nodes)
             
             timestep_end = time.time()
             timestep_times.append(timestep_end - timestep_start)
@@ -287,14 +528,38 @@ class VectorizedForwardEngine:
         
         if self.verbose:
             print(f"\n🏁 Vectorized forward pass completed after {timestep} timesteps")
+            
+            # DETAILED FINAL STATE ANALYSIS
+            print(f"   📊 Final timestep analysis:")
+            print(f"      • Active nodes: {len(final_indices)}")
+            if len(final_indices) > 0:
+                final_node_ids = [
+                    self.activation_table.index_to_node_id.get(idx.item(), f'idx_{idx}') 
+                    for idx in final_indices[:10]
+                ]
+                print(f"      • Active node IDs (first 10): {final_node_ids}")
+            
+            # Check each output node individually
+            print(f"   🎯 Individual output node analysis:")
+            for output_node_id in self.output_nodes:
+                is_active = self.activation_table.is_active(output_node_id)
+                strength = 0.0
+                if is_active:
+                    act_idx = self.activation_table._get_node_index(output_node_id)
+                    strength = self.activation_table.strength_storage[act_idx].item()
+                print(f"      • Output {output_node_id}: active={is_active}, strength={strength:.4f}")
+            
+            # Final output detection summary
             if final_output_active.any():
                 final_active_outputs = self.output_node_indices[final_output_active]
                 final_output_nodes = [
                     self.propagation_engine.index_to_node.get(idx.item(), f"idx_{idx}")
                     for idx in final_active_outputs
                 ]
-                print(f"   🎯 Final active output nodes: {final_output_nodes}")
-            print(f"   🔹 Total active nodes: {len(final_indices)}")
+                print(f"   ✅ Final active output nodes: {final_output_nodes}")
+            else:
+                print(f"   ❌ No output nodes detected as active in final timestep")
+            
             print(f"   ⚡ Average timestep time: {sum(timestep_times)/max(len(timestep_times), 1):.4f}s")
         
         # Update statistics
@@ -360,28 +625,48 @@ class VectorizedForwardEngine:
         Inject propagation results using batch operations.
         
         Args:
-            target_indices: Target node indices [num_targets]
-            new_phases: New phase indices [num_targets, vector_dim]
-            new_mags: New magnitude indices [num_targets, vector_dim]
-            strengths: Activation strengths [num_targets]
+            target_indices: Target node indices [num_targets] - already filtered for excitatory signals
+            new_phases: New phase indices [num_targets, vector_dim] - already filtered
+            new_mags: New magnitude indices [num_targets, vector_dim] - already filtered
+            strengths: Activation strengths [num_targets] - already filtered (all > 0)
         """
         if len(target_indices) == 0:
             return
         
+        # Ensure all tensors have consistent batch size
+        batch_size = target_indices.size(0)
+        assert new_phases.size(0) == batch_size, f"Phase batch size {new_phases.size(0)} != target batch size {batch_size}"
+        assert new_mags.size(0) == batch_size, f"Mag batch size {new_mags.size(0)} != target batch size {batch_size}"
+        assert strengths.size(0) == batch_size, f"Strength batch size {strengths.size(0)} != target batch size {batch_size}"
+        
         # Convert target indices to activation table indices
         activation_indices = torch.zeros_like(target_indices)
+        valid_mask = torch.zeros(batch_size, dtype=torch.bool, device=self.device)
         
         for i, target_idx in enumerate(target_indices):
             if target_idx.item() in self.propagation_engine.index_to_node:
                 node_id = self.propagation_engine.index_to_node[target_idx.item()]
                 activation_indices[i] = self.activation_table._get_node_index(node_id)
+                valid_mask[i] = True
         
-        # Batch injection
-        self.activation_table.inject_batch(activation_indices, new_phases, new_mags, strengths)
+        # Only inject valid targets
+        if valid_mask.any():
+            valid_activation_indices = activation_indices[valid_mask]
+            valid_new_phases = new_phases[valid_mask]
+            valid_new_mags = new_mags[valid_mask]
+            valid_strengths = strengths[valid_mask]
+            
+            # Batch injection with validated tensors
+            self.activation_table.inject_batch(
+                valid_activation_indices, 
+                valid_new_phases, 
+                valid_new_mags, 
+                valid_strengths
+            )
     
     def _check_output_activation_vectorized(self, active_indices: torch.Tensor) -> torch.Tensor:
         """
-        Check for output activation using vectorized operations.
+        ENHANCED: Check for output activation with robust index mapping.
         
         Args:
             active_indices: Currently active node indices [num_active]
@@ -392,28 +677,62 @@ class VectorizedForwardEngine:
         if len(self.output_node_indices) == 0 or len(active_indices) == 0:
             return torch.zeros(len(self.output_node_indices), dtype=torch.bool, device=self.device)
         
-        # Create activation mask for all nodes
-        activation_mask = torch.zeros(self.max_nodes, dtype=torch.bool, device=self.device)
+        # ENHANCED: Direct check using activation table (more reliable)
+        output_active = torch.zeros(len(self.output_node_indices), dtype=torch.bool, device=self.device)
         
-        # Convert active indices from activation table to propagation engine indices
-        active_prop_indices = []
-        for act_idx in active_indices:
-            if act_idx.item() in self.activation_table.index_to_node_id:
-                node_id = self.activation_table.index_to_node_id[act_idx.item()]
-                if node_id in self.propagation_engine.node_to_index:
-                    prop_idx = self.propagation_engine.node_to_index[node_id]
-                    active_prop_indices.append(prop_idx)
-        
-        if not active_prop_indices:
-            return torch.zeros(len(self.output_node_indices), dtype=torch.bool, device=self.device)
-        
-        active_prop_tensor = torch.tensor(active_prop_indices, dtype=torch.long, device=self.device)
-        activation_mask[active_prop_tensor] = True
-        
-        # Check which output nodes are active
-        output_active = activation_mask[self.output_node_indices]
+        for i, output_idx in enumerate(self.output_node_indices):
+            output_node_id = self.propagation_engine.index_to_node.get(output_idx.item())
+            if output_node_id:
+                # Direct check in activation table (bypasses index conversion issues)
+                is_active = self.activation_table.is_active(output_node_id)
+                output_active[i] = is_active
         
         return output_active
+    
+    def _detailed_output_diagnostics(self, active_indices: torch.Tensor) -> Dict:
+        """Detailed diagnostics for output node detection."""
+        diagnostics = {}
+        
+        for i, output_idx in enumerate(self.output_node_indices):
+            output_node_id = self.propagation_engine.index_to_node.get(output_idx.item())
+            
+            # Check if output is in active indices
+            is_active_in_table = any(
+                self.activation_table.index_to_node_id.get(act_idx.item()) == output_node_id
+                for act_idx in active_indices
+            )
+            
+            # Check activation table directly
+            is_active_direct = self.activation_table.is_active(output_node_id) if output_node_id else False
+            
+            # Get signal strength if active
+            strength = None
+            if is_active_direct and output_node_id:
+                act_idx = self.activation_table._get_node_index(output_node_id)
+                if act_idx < len(self.activation_table.strength_storage):
+                    strength = self.activation_table.strength_storage[act_idx].item()
+            
+            diagnostics[output_node_id or f"idx_{output_idx}"] = {
+                'active_in_table': is_active_in_table,
+                'active_direct': is_active_direct,
+                'strength': strength
+            }
+        
+        return diagnostics
+    
+    def _get_output_signal_strengths(self) -> Dict:
+        """Get signal strengths for all output nodes."""
+        strengths = {}
+        
+        for output_node_id in self.output_nodes:
+            if self.activation_table.is_active(output_node_id):
+                act_idx = self.activation_table._get_node_index(output_node_id)
+                strength = self.activation_table.strength_storage[act_idx].item()
+                strengths[output_node_id] = strength
+            else:
+                strengths[output_node_id] = 0.0
+        
+        return strengths
     
     def get_active_output_nodes(self) -> List[str]:
         """
@@ -546,7 +865,7 @@ def create_vectorized_forward_engine(
         node_store=node_store,
         phase_cell=phase_cell,
         lookup_table=lookup_table,
-        max_nodes=config.get('architecture', {}).get('total_nodes', 1000),
+        max_nodes=config.get('architecture', {}).get('total_nodes', 1000) + 200,
         vector_dim=config.get('architecture', {}).get('vector_dim', 5),
         phase_bins=config.get('resolution', {}).get('phase_bins', 32),
         mag_bins=config.get('resolution', {}).get('mag_bins', 512),

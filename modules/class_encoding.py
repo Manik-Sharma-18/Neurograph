@@ -2,7 +2,7 @@
 
 import torch
 
-def generate_fixed_class_encodings(phase_bins, mag_bins, vector_dim, seed=42):
+def generate_fixed_class_encodings(phase_bins, mag_bins, vector_dim, seed):
     """
     Returns a dictionary mapping digit labels (0–9) to fixed target phase/mag vectors.
     These will be used as shared targets for all output nodes (Option 1).
@@ -25,7 +25,7 @@ def generate_fixed_class_encodings(phase_bins, mag_bins, vector_dim, seed=42):
     return encodings
 
 
-def generate_digit_class_encodings(num_classes=10, vector_dim=5, phase_bins=8, mag_bins=256, seed=42):
+def generate_digit_class_encodings(num_classes, vector_dim, phase_bins, mag_bins, seed):
     """
     Generates fixed target context (phase and magnitude) for digit labels 0–9.
 

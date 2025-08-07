@@ -22,8 +22,8 @@ class OrthogonalClassEncoder:
     - Validation of orthogonality constraints
     """
     
-    def __init__(self, num_classes: int = 10, encoding_dim: int = 5, 
-                 phase_bins: int = 64, mag_bins: int = 1024, 
+    def __init__(self, num_classes: int, encoding_dim: int,
+                 phase_bins: int, mag_bins: int,
                  orthogonality_threshold: float = 0.1, device: str = 'cpu',
                  cache_encodings: bool = True):
         """
@@ -384,8 +384,8 @@ class OrthogonalClassEncoder:
 class StructuredClassEncoder:
     """Alternative structured encoding using mathematical patterns."""
     
-    def __init__(self, num_classes: int = 10, encoding_dim: int = 5,
-                 phase_bins: int = 64, mag_bins: int = 1024, device: str = 'cpu'):
+    def __init__(self, num_classes: int, encoding_dim: int,
+                 phase_bins: int, mag_bins: int, device: str = 'cpu'):
         """Initialize structured encoder with mathematical patterns."""
         self.num_classes = num_classes
         self.encoding_dim = encoding_dim

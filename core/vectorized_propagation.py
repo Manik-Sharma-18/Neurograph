@@ -224,7 +224,7 @@ class VectorizedPropagationEngine:
         source_tensor = torch.tensor(all_source_indices, dtype=torch.long, device=self.device)
         
         # Batch phase cell computation
-        new_phases, new_mags, strengths = self._compute_phase_cell_batch(
+        filtered_target_indices, new_phases, new_mags, strengths = self._compute_phase_cell_batch(
             source_tensor, target_tensor, active_indices, active_phases, active_mags
         )
         
@@ -236,14 +236,14 @@ class VectorizedPropagationEngine:
             self.stats['radiation_computations'] += 1
         self.stats['static_propagations'] += 1
         
-        return target_tensor, new_phases, new_mags, strengths
+        return filtered_target_indices, new_phases, new_mags, strengths
     
     def _get_static_targets_vectorized(
         self, 
         active_indices: torch.Tensor
     ) -> Tuple[List[int], List[int]]:
         """
-        Get static propagation targets using vectorized operations.
+        Get static propagation targets using vectorized operations with bounds checking.
         
         Args:
             active_indices: Active node indices [num_active]
@@ -254,14 +254,23 @@ class VectorizedPropagationEngine:
         target_indices = []
         source_indices = []
         
-        # Use adjacency matrix for efficient neighbor lookup
+        # Get adjacency matrix dimensions
+        num_nodes = self.adjacency_matrix.size(0)
+        
+        # Use adjacency matrix for efficient neighbor lookup with bounds checking
         for source_idx in active_indices:
+            source_idx_val = source_idx.item()
+            
+            # Skip if source index is out of bounds for adjacency matrix
+            if source_idx_val >= num_nodes:
+                continue
+                
             # Find all targets for this source
-            targets = torch.nonzero(self.adjacency_matrix[source_idx], as_tuple=True)[0]
+            targets = torch.nonzero(self.adjacency_matrix[source_idx_val], as_tuple=True)[0]
             
             for target_idx in targets:
                 target_indices.append(target_idx.item())
-                source_indices.append(source_idx.item())
+                source_indices.append(source_idx_val)
         
         return target_indices, source_indices
     
@@ -334,16 +343,23 @@ class VectorizedPropagationEngine:
         
         for i, source_idx in enumerate(batch_active_indices):
             source_phase = batch_active_phases[i]  # [vector_dim]
+            source_idx_val = source_idx.item()
             
-            # Exclude static neighbors and self
-            excluded_nodes = set([source_idx.item()])
-            static_neighbors = torch.nonzero(self.adjacency_matrix[source_idx], as_tuple=True)[0]
-            excluded_nodes.update(static_neighbors.cpu().numpy())
+            # Exclude static neighbors and self with bounds checking
+            excluded_nodes = set([source_idx_val])
+            
+            # Skip if source index is out of bounds for adjacency matrix
+            if source_idx_val < self.adjacency_matrix.size(0):
+                static_neighbors = torch.nonzero(self.adjacency_matrix[source_idx_val], as_tuple=True)[0]
+                excluded_nodes.update(static_neighbors.cpu().numpy())
+            
+            # REMOVED: Output node exclusion logic - allow all nodes to be radiation targets
             
             # Create candidate mask
             candidate_mask = torch.ones(num_nodes, dtype=torch.bool, device=self.device)
             for excluded_idx in excluded_nodes:
-                candidate_mask[excluded_idx] = False
+                if excluded_idx < num_nodes:  # bounds check
+                    candidate_mask[excluded_idx] = False
             
             if not candidate_mask.any():
                 continue
@@ -439,7 +455,7 @@ class VectorizedPropagationEngine:
         active_mags: torch.Tensor
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """
-        Batch computation of phase cell operations.
+        Batch computation of phase cell operations with excitatory/inhibitory filtering.
         
         Args:
             source_indices: Source node indices [num_propagations]
@@ -449,7 +465,7 @@ class VectorizedPropagationEngine:
             active_mags: Active magnitudes [num_active, vector_dim]
             
         Returns:
-            Tuple of (new_phases, new_mags, strengths)
+            Tuple of (new_phases, new_mags, strengths) - only excitatory signals
         """
         num_propagations = len(source_indices)
         
@@ -473,11 +489,16 @@ class VectorizedPropagationEngine:
             device=self.device
         )
         
+        valid_propagations = []
         for i, source_idx in enumerate(source_indices):
-            if source_idx.item() in active_index_map:
-                active_pos = active_index_map[source_idx.item()]
-                source_phases_batch[i] = active_phases[active_pos]
-                source_mags_batch[i] = active_mags[active_pos]
+            # Only process if source is active
+            source_node_id = self.index_to_node.get(source_idx.item())
+            if source_node_id and self.node_store.is_node_active(source_node_id):
+                if source_idx.item() in active_index_map:
+                    active_pos = active_index_map[source_idx.item()]
+                    source_phases_batch[i] = active_phases[active_pos]
+                    source_mags_batch[i] = active_mags[active_pos]
+                    valid_propagations.append(i)
         
         # Gather target self data
         target_phases_batch = torch.zeros(
@@ -514,6 +535,12 @@ class VectorizedPropagationEngine:
             
             # Vectorized phase cell computation
             for i in range(batch_end - batch_start):
+                global_idx = batch_start + i
+                
+                # Skip invalid propagations
+                if global_idx not in valid_propagations:
+                    continue
+                
                 ctx_phase = batch_ctx_phases[i]
                 ctx_mag = batch_ctx_mags[i]
                 self_phase = batch_self_phases[i]
@@ -524,11 +551,32 @@ class VectorizedPropagationEngine:
                     ctx_phase, ctx_mag, self_phase, self_mag
                 )
                 
-                new_phases_batch[batch_start + i] = phase_out
-                new_mags_batch[batch_start + i] = mag_out
-                strengths_batch[batch_start + i] = strength.item() if hasattr(strength, 'item') else strength
+                # NEW: Only process excitatory signals (strength > 0)
+                if strength > 0:
+                    # Activate target node
+                    target_idx = target_indices[global_idx]
+                    target_node_id = self.index_to_node.get(target_idx.item())
+                    if target_node_id:
+                        self.node_store.activate_node(target_node_id)
+                    
+                    # Store results
+                    new_phases_batch[global_idx] = phase_out
+                    new_mags_batch[global_idx] = mag_out
+                    strengths_batch[global_idx] = strength.item() if hasattr(strength, 'item') else strength
+                # Inhibitory signals (strength <= 0) are discarded
         
-        return new_phases_batch, new_mags_batch, strengths_batch
+        # Filter to only excitatory propagations
+        excitatory_mask = strengths_batch > 0
+        
+        # Also filter target indices to match
+        filtered_target_indices = target_indices[excitatory_mask]
+        
+        return (
+            filtered_target_indices,
+            new_phases_batch[excitatory_mask],
+            new_mags_batch[excitatory_mask],
+            strengths_batch[excitatory_mask]
+        )
     
     def get_performance_stats(self) -> Dict:
         """Get detailed performance statistics."""

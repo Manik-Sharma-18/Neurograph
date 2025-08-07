@@ -67,8 +67,8 @@ class ModularPhaseCell(nn.Module):
         # Compute signal using lookup tables
         signal, grad_phase, grad_mag = self.lookup.forward(phase_out, mag_out)
         
-        # Activation strength is sum of signal magnitudes
-        strength = torch.sum(torch.abs(signal))
+        # NEW: Raw sum strength (can be negative for inhibitory signals)
+        strength = torch.sum(signal)
         
         return phase_out, mag_out, signal, strength, grad_phase, grad_mag
     

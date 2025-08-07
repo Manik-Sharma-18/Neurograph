@@ -22,26 +22,26 @@ class VectorizedActivationTable:
     """
     
     def __init__(
-        self, 
-        max_nodes: int,
-        vector_dim: int, 
-        phase_bins: int, 
-        mag_bins: int,
-        decay_factor: float = 0.95, 
-        min_strength: float = 0.001, 
+        self,
+        max_nodes: int = 1200,
+        vector_dim: int = 8,
+        phase_bins: int = 32,
+        mag_bins: int = 512,
+        decay_factor: float = 0.95,
+        min_strength: float = 0.001,
         device: str = 'auto'
     ):
         """
         Initialize vectorized activation table.
         
         Args:
-            max_nodes: Maximum number of nodes in the graph
+            max_nodes: Maximum number of nodes that can be active (increased to 1200)
             vector_dim: Dimensionality of phase/mag vectors
             phase_bins: Number of discrete phase values
             mag_bins: Number of discrete magnitude values
-            decay_factor: Multiplier applied to activation strength each timestep
-            min_strength: Threshold below which activation is pruned
-            device: Computation device ('cpu', 'cuda', or 'auto')
+            decay_factor: Decay factor per timestep
+            min_strength: Minimum activation strength threshold
+            device: Computation device
         """
         self.max_nodes = max_nodes
         self.vector_dim = vector_dim
@@ -49,6 +49,13 @@ class VectorizedActivationTable:
         self.mag_bins = mag_bins
         self.decay_factor = decay_factor
         self.min_strength = min_strength
+        
+        # Adaptive pruning parameters - GENTLE & STABLE
+        self.base_min_strength = min_strength  # Original threshold
+        self.current_min_strength = min_strength  # Dynamic threshold
+        self.target_active_nodes = 800  # Generous target for stable operation
+        self.adaptation_rate = 0.1  # Gentle adaptation rate
+        self.max_min_strength = 5.0  # Reasonable maximum threshold
         
         # Device management
         if device == 'auto':
@@ -65,6 +72,7 @@ class VectorizedActivationTable:
         self.node_id_to_index: Dict[str, int] = {}
         self.index_to_node_id: Dict[int, str] = {}
         self.next_free_index = 0
+        self.free_indices = []  # Pool of recycled indices
         
         # Performance statistics
         self.stats = {
@@ -156,23 +164,35 @@ class VectorizedActivationTable:
         return total_bytes / (1024 * 1024)
     
     def _get_node_index(self, node_id: str) -> int:
-        """Get or allocate tensor index for node ID."""
+        """Get or allocate tensor index for node ID with index recycling."""
         if node_id in self.node_id_to_index:
             return self.node_id_to_index[node_id]
         
-        # Allocate new index
-        if self.next_free_index >= self.max_nodes:
-            raise RuntimeError(f"Activation table full ({self.max_nodes} nodes)")
+        # Try to reuse a freed index first
+        if self.free_indices:
+            index = self.free_indices.pop()
+            # Reduced logging for cleaner output
+            if len(self.node_id_to_index) % 100 == 0:  # Log every 100 allocations
+                print(f"♻️ Recycling index {index} for node '{node_id}' (total: {len(self.node_id_to_index)})")
+        else:
+            # Only allocate new index if no recycled ones available
+            if self.next_free_index >= self.max_nodes:
+                print(f"🚨 ERROR: Activation table full!")
+                print(f"🚨 Max nodes: {self.max_nodes}")
+                print(f"🚨 Next free index: {self.next_free_index}")
+                print(f"🚨 Total unique nodes seen: {len(self.node_id_to_index)}")
+                print(f"🚨 Free indices available: {len(self.free_indices)}")
+                raise RuntimeError(f"Activation table full ({self.max_nodes} nodes)")
+            
+            index = self.next_free_index
+            self.next_free_index += 1
+            # Reduced logging for cleaner output
+            if len(self.node_id_to_index) % 100 == 0:  # Log every 100 allocations
+                print(f"🆕 Allocating NEW index {index} for node '{node_id}' (total: {len(self.node_id_to_index)})")
         
-        index = self.next_free_index
+        # Map the node to its index
         self.node_id_to_index[node_id] = index
         self.index_to_node_id[index] = node_id
-        
-        # Find next free index
-        self.next_free_index += 1
-        while (self.next_free_index < self.max_nodes and 
-               self.active_mask[self.next_free_index]):
-            self.next_free_index += 1
         
         return index
     
@@ -226,7 +246,7 @@ class VectorizedActivationTable:
         strengths: torch.Tensor
     ):
         """
-        Vectorized batch injection for maximum GPU performance.
+        Vectorized batch injection for maximum GPU performance with excitatory filtering.
         
         Args:
             node_indices: Node indices tensor [batch_size]
@@ -236,11 +256,18 @@ class VectorizedActivationTable:
         """
         batch_size = node_indices.size(0)
         
+        if batch_size == 0:
+            return  # Nothing to inject
+        
         # Ensure all tensors are on GPU
         node_indices = node_indices.to(self.device)
         phase_indices = phase_indices.to(self.device)
         mag_indices = mag_indices.to(self.device)
         strengths = strengths.to(self.device)
+        
+        # Note: Excitatory/inhibitory filtering is already done in propagation engine
+        # All signals reaching here should be excitatory (strength > 0)
+        filtered_batch_size = batch_size
         
         # Check for existing activations
         existing_mask = self.active_mask[node_indices]
@@ -275,17 +302,41 @@ class VectorizedActivationTable:
             self.strength_storage[new_indices] = new_strengths
             self.active_mask[new_indices] = True
         
-        self.stats['total_injections'] += batch_size
+        self.stats['total_injections'] += filtered_batch_size
         self.stats['vectorized_operations'] += 1
         self.stats['peak_active_nodes'] = max(
             self.stats['peak_active_nodes'], 
             self.active_mask.sum().item()
         )
     
-    def decay_and_prune_vectorized(self):
+    def _adapt_pruning_threshold(self, current_active_count: int):
         """
-        Vectorized decay and pruning using GPU tensor operations.
-        Orders of magnitude faster than individual node processing.
+        Adapt pruning threshold based on current network load.
+        
+        Args:
+            current_active_count: Current number of active nodes
+        """
+        if current_active_count > self.target_active_nodes:
+            # Network overloaded - increase threshold to prune more aggressively
+            overage_ratio = current_active_count / self.target_active_nodes
+            self.current_min_strength *= (1.0 + self.adaptation_rate * overage_ratio)
+        elif current_active_count < self.target_active_nodes * 0.7:
+            # Network underloaded - decrease threshold to keep more nodes
+            self.current_min_strength *= (1.0 - self.adaptation_rate * 0.5)
+        
+        # Emergency brake for extreme overload
+        if current_active_count > self.max_nodes * 0.9:
+            self.current_min_strength *= 2.0  # Double threshold immediately
+        
+        # Keep within reasonable bounds
+        self.current_min_strength = max(0.5, min(self.current_min_strength, self.max_min_strength))
+    
+    def decay_and_prune_vectorized(self, output_nodes: Optional[Set[str]] = None):
+        """
+        Enhanced vectorized decay and pruning with adaptive threshold and output protection.
+        
+        Args:
+            output_nodes: Set of output node IDs to protect from pruning
         """
         # Get active nodes mask
         active_indices = torch.nonzero(self.active_mask, as_tuple=True)[0]
@@ -293,11 +344,28 @@ class VectorizedActivationTable:
         if len(active_indices) == 0:
             return
         
+        current_active_count = len(active_indices)
+        
+        # Adapt pruning threshold based on network load
+        self._adapt_pruning_threshold(current_active_count)
+        
         # Vectorized decay - single GPU operation
         self.strength_storage[active_indices] *= self.decay_factor
         
-        # Vectorized pruning - find weak nodes
-        weak_mask = self.strength_storage[active_indices] < self.min_strength
+        # Priority-based pruning with output protection
+        weak_mask = self.strength_storage[active_indices] < self.current_min_strength
+        
+        # Protect output nodes from pruning
+        if output_nodes:
+            output_protection_mask = torch.zeros_like(weak_mask, dtype=torch.bool)
+            for i, idx in enumerate(active_indices):
+                node_id = self.index_to_node_id.get(idx.item())
+                if node_id and node_id in output_nodes:
+                    output_protection_mask[i] = True
+            
+            # Apply protection: don't prune protected nodes
+            weak_mask = weak_mask & ~output_protection_mask
+        
         weak_indices = active_indices[weak_mask]
         
         if len(weak_indices) > 0:
@@ -305,17 +373,33 @@ class VectorizedActivationTable:
             self.active_mask[weak_indices] = False
             self.strength_storage[weak_indices] = 0.0
             
-            # Update node mappings for removed nodes
+            # Add freed indices to recycling pool (DON'T delete mappings)
             for idx in weak_indices.cpu().numpy():
                 if idx in self.index_to_node_id:
                     node_id = self.index_to_node_id[idx]
+                    # Remove from active mappings but keep the permanent mapping
                     del self.node_id_to_index[node_id]
                     del self.index_to_node_id[idx]
+                    # Add to free pool for recycling
+                    self.free_indices.append(idx)
+                    print(f"♻️ Added index {idx} (node '{node_id}') to recycling pool")
             
             self.stats['total_prunes'] += len(weak_indices)
         
         self.stats['total_decays'] += 1
         self.stats['vectorized_operations'] += 1
+    
+    def get_adaptive_stats(self) -> Dict:
+        """Get adaptive pruning statistics."""
+        return {
+            'base_min_strength': self.base_min_strength,
+            'current_min_strength': self.current_min_strength,
+            'target_active_nodes': self.target_active_nodes,
+            'adaptation_rate': self.adaptation_rate,
+            'threshold_ratio': self.current_min_strength / self.base_min_strength,
+            'active_nodes': self.get_num_active(),
+            'capacity_utilization': self.get_num_active() / self.max_nodes
+        }
     
     def get_active_indices(self) -> torch.Tensor:
         """
@@ -399,6 +483,18 @@ class VectorizedActivationTable:
             for idx in active_indices 
             if idx.item() in self.index_to_node_id
         ]
+    
+    def get_active_nodes_at_last_timestep(self) -> List[str]:
+        """
+        Get active nodes at the last timestep (compatibility method for training).
+        
+        This method provides compatibility with the training system that expects
+        to get active nodes for credit assignment.
+        
+        Returns:
+            List of active node IDs
+        """
+        return self.get_active_node_ids()
     
     def is_active(self, node_id: str) -> bool:
         """Check if node is currently active."""
