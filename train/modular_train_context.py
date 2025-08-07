@@ -814,11 +814,13 @@ class ModularTrainContext:
     
     def apply_direct_updates(self, node_gradients: Dict[int, Tuple[torch.Tensor, torch.Tensor]]):
         """
-        Apply gradients directly without accumulation using continuous gradient approximation.
+        Apply gradients using proper discrete gradient accumulation system.
         
-        This method uses the new continuous gradient approach to convert gradients
-        to discrete parameter updates with proper modular arithmetic.
+        This method uses the enhanced continuous gradient approach with threshold-based
+        accumulation to ensure effective discrete parameter updates.
         """
+        nodes_updated = []
+        
         for node_id, (phase_grad, mag_grad) in node_gradients.items():
             string_node_id = f"n{node_id}"  # Convert to string format for node_store
             
@@ -827,19 +829,44 @@ class ModularTrainContext:
                 current_phase_idx = self.node_store.phase_table[string_node_id]
                 current_mag_idx = self.node_store.mag_table[string_node_id]
                 
-                # Convert continuous gradients to discrete updates using lookup tables
+                # Get dual learning rates from config
+                dual_lr_config = self.config.get('training.optimizer.dual_learning_rates', {})
+                if dual_lr_config.get('enabled', False):
+                    phase_lr = dual_lr_config.get('phase_learning_rate', self.effective_lr)
+                    magnitude_lr = dual_lr_config.get('magnitude_learning_rate', self.effective_lr)
+                else:
+                    phase_lr = magnitude_lr = self.effective_lr
+                
+                # Use dual learning rates for gradient quantization
                 phase_updates, mag_updates = self.lookup_tables.quantize_gradients_to_discrete_updates(
-                    phase_grad, mag_grad, self.effective_lr
+                    phase_grad, mag_grad, phase_lr, magnitude_lr, node_id=string_node_id
                 )
                 
-                # Apply updates with proper modular arithmetic
-                new_phase_idx, new_mag_idx = self.lookup_tables.apply_discrete_updates(
-                    current_phase_idx, current_mag_idx, phase_updates, mag_updates
-                )
-                
-                # Update node store using .data to avoid Parameter type issues
-                self.node_store.phase_table[string_node_id].data = new_phase_idx.detach()
-                self.node_store.mag_table[string_node_id].data = new_mag_idx.detach()
+                # Step 2: Only apply updates if they're non-zero (threshold reached)
+                if torch.any(phase_updates != 0) or torch.any(mag_updates != 0):
+                    # Apply updates with proper modular arithmetic
+                    new_phase_idx, new_mag_idx = self.lookup_tables.apply_discrete_updates(
+                        current_phase_idx, current_mag_idx, phase_updates, mag_updates
+                    )
+                    
+                    # Update node store using .data to avoid Parameter type issues
+                    self.node_store.phase_table[string_node_id].data = new_phase_idx.detach()
+                    self.node_store.mag_table[string_node_id].data = new_mag_idx.detach()
+                    
+                    nodes_updated.append(node_id)
+                    
+                    # Debug logging for successful updates
+                    if hasattr(self, 'debug_updates') and self.debug_updates:
+                        print(f"      ✅ Updated node {string_node_id}: "
+                              f"Phase Δ={torch.sum(torch.abs(phase_updates)).item():.0f}, "
+                              f"Mag Δ={torch.sum(torch.abs(mag_updates)).item():.0f}")
+        
+        # Log accumulation statistics
+        if hasattr(self, 'debug_accumulation') and self.debug_accumulation:
+            total_nodes = len(node_gradients)
+            updated_nodes = len(nodes_updated)
+            print(f"      📊 Accumulation: {updated_nodes}/{total_nodes} nodes updated "
+                  f"({updated_nodes/total_nodes*100:.1f}% effectiveness)")
     
     def apply_direct_updates_with_diagnostics(self, node_gradients: Dict[int, Tuple[torch.Tensor, torch.Tensor]], 
                                             before_params: Optional[Dict] = None):
@@ -860,9 +887,17 @@ class ModularTrainContext:
                 current_phase_idx = self.node_store.phase_table[string_node_id]
                 current_mag_idx = self.node_store.mag_table[string_node_id]
                 
-                # Convert continuous gradients to discrete updates using lookup tables
+                # Get dual learning rates from config
+                dual_lr_config = self.config.get('training.optimizer.dual_learning_rates', {})
+                if dual_lr_config.get('enabled', False):
+                    phase_lr = dual_lr_config.get('phase_learning_rate', self.effective_lr)
+                    magnitude_lr = dual_lr_config.get('magnitude_learning_rate', self.effective_lr)
+                else:
+                    phase_lr = magnitude_lr = self.effective_lr
+                
+                # Convert continuous gradients to discrete updates using dual learning rates
                 phase_updates, mag_updates = self.lookup_tables.quantize_gradients_to_discrete_updates(
-                    phase_grad, mag_grad, self.effective_lr
+                    phase_grad, mag_grad, phase_lr, magnitude_lr
                 )
                 
                 # Apply updates with proper modular arithmetic
@@ -886,6 +921,8 @@ class ModularTrainContext:
         if self.discrete_update_analyzer is not None and updated_nodes:
             # Create discrete updates dict for analysis
             discrete_updates = {}
+            continuous_gradients = {}
+            
             for node_id in updated_nodes:
                 string_node_id = f"n{node_id}"
                 if string_node_id in self.node_store.phase_table and before_params and string_node_id in before_params:
@@ -893,15 +930,19 @@ class ModularTrainContext:
                     current_phase = self.node_store.phase_table[string_node_id]
                     current_mag = self.node_store.mag_table[string_node_id]
                     
-                    # Calculate discrete updates
+                    # Calculate discrete updates (actual parameter changes)
                     phase_update = current_phase - prev_phase
                     mag_update = current_mag - prev_mag
                     
                     discrete_updates[node_id] = (phase_update, mag_update)
+                    
+                    # Get continuous gradients for this node
+                    if node_id in node_gradients:
+                        continuous_gradients[node_id] = node_gradients[node_id]
             
-            if discrete_updates:
+            if discrete_updates and continuous_gradients:
                 self.discrete_update_analyzer.analyze_discrete_update_effectiveness(
-                    node_gradients, discrete_updates, self.effective_lr
+                    continuous_gradients, discrete_updates, self.effective_lr
                 )
     
     def get_diagnostic_summary(self) -> Optional[Dict[str, Any]]:
@@ -911,7 +952,7 @@ class ModularTrainContext:
         Returns:
             Dictionary with diagnostic summaries or None if diagnostics disabled
         """
-        if self.backward_pass_diagnostics is None:
+        if not hasattr(self, 'backward_pass_diagnostics') or self.backward_pass_diagnostics is None:
             return None
         
         summary = {
@@ -921,11 +962,11 @@ class ModularTrainContext:
         }
         
         # Add gradient flow analysis if available
-        if self.gradient_flow_analyzer is not None:
+        if hasattr(self, 'gradient_flow_analyzer') and self.gradient_flow_analyzer is not None:
             summary['gradient_flow_analysis'] = self.gradient_flow_analyzer.get_flow_analysis_summary()
         
         # Add discrete update analysis if available
-        if self.discrete_update_analyzer is not None:
+        if hasattr(self, 'discrete_update_analyzer') and self.discrete_update_analyzer is not None:
             summary['discrete_update_analysis'] = self.discrete_update_analyzer.get_update_analysis_summary()
         
         return summary

@@ -235,7 +235,7 @@ class BackwardPassDiagnostics:
                     
                     # Calculate discrete parameter changes
                     # Get phase_bins and mag_bins from the lookup tables or config
-                    phase_bins = getattr(node_store, 'phase_bins', 32)  # Default fallback
+                    phase_bins = getattr(node_store, 'phase_bins', 64)  # Default fallback updated
                     mag_bins = getattr(node_store, 'mag_bins', 512)     # Default fallback
                     
                     phase_change = self._calculate_discrete_change(prev_phase, current_phase, phase_bins)
@@ -905,22 +905,26 @@ class DiscreteUpdateAnalyzer:
     def _compute_update_effectiveness(self, continuous_grad: torch.Tensor, 
                                     discrete_update: torch.Tensor, learning_rate: float) -> float:
         """Compute how effectively continuous gradient was converted to discrete update."""
-        # Expected continuous update
-        expected_update = continuous_grad * learning_rate
+        # Calculate expected discrete changes based on gradient magnitude
+        grad_norm = torch.norm(continuous_grad).item()
+        expected_continuous_update = grad_norm * learning_rate
         
-        # Actual discrete update (convert to continuous scale)
-        actual_update = discrete_update.float()
+        # Calculate actual discrete changes (sum of absolute discrete updates)
+        actual_discrete_changes = torch.sum(torch.abs(discrete_update)).item()
         
-        # Compute cosine similarity as effectiveness measure
-        if torch.norm(expected_update) > 1e-8 and torch.norm(actual_update) > 1e-8:
-            effectiveness = torch.nn.functional.cosine_similarity(
-                expected_update.flatten().unsqueeze(0),
-                actual_update.flatten().unsqueeze(0)
-            ).item()
+        # Effectiveness = ratio of actual discrete changes to expected magnitude
+        # This measures how much of the gradient signal was captured in discrete updates
+        if expected_continuous_update > 1e-8:
+            # Scale by a reasonable factor to get percentage-like values
+            # Assume typical discrete step size is ~0.01 (1% of parameter range)
+            typical_step_size = 0.01
+            expected_discrete_changes = expected_continuous_update / typical_step_size
+            effectiveness = actual_discrete_changes / expected_discrete_changes
         else:
             effectiveness = 0.0
         
-        return max(0.0, effectiveness)  # Clamp to [0, 1]
+        # Return effectiveness as a ratio (can be > 1.0 if very effective)
+        return max(0.0, effectiveness)
     
     def _compute_quantization_loss(self, continuous_grad: torch.Tensor, 
                                  discrete_update: torch.Tensor, learning_rate: float) -> float:

@@ -382,7 +382,8 @@ class VectorizedActivationTable:
                     del self.index_to_node_id[idx]
                     # Add to free pool for recycling
                     self.free_indices.append(idx)
-                    print(f"♻️ Added index {idx} (node '{node_id}') to recycling pool")
+                    # Verbose recycling output disabled for cleaner training logs
+                    # print(f"♻️ Added index {idx} (node '{node_id}') to recycling pool")
             
             self.stats['total_prunes'] += len(weak_indices)
         

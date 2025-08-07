@@ -35,36 +35,6 @@ class HighResolutionLookupTables(nn.Module):
     - Gradient computation for discrete updates
     """
     
-    def __init__(self, phase_bins: int, mag_bins: int, device: str = 'cpu'):
-        """
-        Initialize high-resolution lookup tables.
-        
-        Args:
-            phase_bins: Number of discrete phase bins (default: 64)
-            mag_bins: Number of discrete magnitude bins (default: 1024)
-            device: Computation device ('cpu' or 'cuda')
-        """
-        super().__init__()
-        
-        self.N = phase_bins
-        self.M = mag_bins
-        self.device = device
-        
-        print(f"🔧 Initializing High-Resolution Lookup Tables:")
-        print(f"   📊 Phase bins: {phase_bins} (vs 8 legacy)")
-        print(f"   📊 Magnitude bins: {mag_bins} (vs 256 legacy)")
-        print(f"   📈 Resolution increase: {(phase_bins/8) * (mag_bins/256):.1f}x")
-        print(f"   💾 Memory usage: ~{self.estimate_memory_usage():.1f} MB")
-        
-        # Initialize lookup tables
-        self.setup_phase_tables()
-        self.setup_magnitude_tables()
-        self.setup_gradient_tables()
-        
-        # Move to device
-        self.to(device)
-        
-        print(f"✅ High-resolution tables initialized on {device}")
     
     def setup_phase_tables(self):
         """Setup phase-related lookup tables."""
@@ -311,18 +281,60 @@ class HighResolutionLookupTables(nn.Module):
         
         return phase_grad, mag_grad
     
+    def __init__(self, phase_bins: int, mag_bins: int, device: str = 'cpu'):
+        """
+        Initialize high-resolution lookup tables.
+        
+        Args:
+            phase_bins: Number of discrete phase bins (default: 64)
+            mag_bins: Number of discrete magnitude bins (default: 1024)
+            device: Computation device ('cpu' or 'cuda')
+        """
+        super().__init__()
+        
+        self.N = phase_bins
+        self.M = mag_bins
+        self.device = device
+        
+        # Initialize discrete gradient accumulator
+        self.discrete_grad_accumulator = {}  # node_id -> {'phase': float, 'mag': float}
+        self.accumulation_threshold = 0.01  # Threshold for discrete updates (lowered from 0.08)
+        
+        print(f"🔧 Initializing High-Resolution Lookup Tables:")
+        print(f"   📊 Phase bins: {phase_bins} (vs 8 legacy)")
+        print(f"   📊 Magnitude bins: {mag_bins} (vs 256 legacy)")
+        print(f"   📈 Resolution increase: {(phase_bins/8) * (mag_bins/256):.1f}x")
+        print(f"   💾 Memory usage: ~{self.estimate_memory_usage():.1f} MB")
+        print(f"   🎯 Discrete gradient accumulation threshold: {self.accumulation_threshold}")
+        
+        # Initialize lookup tables
+        self.setup_phase_tables()
+        self.setup_magnitude_tables()
+        self.setup_gradient_tables()
+        
+        # Move to device
+        self.to(device)
+        
+        print(f"✅ High-resolution tables initialized on {device}")
+
     def quantize_gradients_to_discrete_updates(self, phase_grad: torch.Tensor, 
                                              mag_grad: torch.Tensor,
-                                             learning_rate: float = 0.01) -> Tuple[torch.Tensor, torch.Tensor]:
+                                             phase_learning_rate: float = 0.015,
+                                             magnitude_learning_rate: float = 0.012,
+                                             node_id: Optional[str] = None) -> Tuple[torch.Tensor, torch.Tensor]:
         """
-        Convert continuous gradients to discrete parameter updates.
+        Convert continuous gradients to discrete parameter updates using gradient accumulation.
         
-        Enhanced version with better sensitivity for small gradients.
+        This implements discrete-level gradient accumulation:
+        - Accumulates small gradients over multiple samples
+        - Only makes discrete updates when accumulated gradient exceeds threshold
+        - Preserves gradient direction for better update effectiveness
         
         Args:
             phase_grad: Continuous phase gradients [D]
             mag_grad: Continuous magnitude gradients [D]
             learning_rate: Learning rate for gradient descent
+            node_id: Node identifier for accumulation tracking
             
         Returns:
             Tuple of (discrete_phase_updates, discrete_mag_updates) as LongTensors
@@ -331,38 +343,62 @@ class HighResolutionLookupTables(nn.Module):
         phase_resolution = 2 * math.pi / self.N
         mag_resolution = 6.0 / self.M
         
-        # Enhanced quantization with better sensitivity
-        # Use a minimum threshold to ensure small gradients still cause updates
-        min_update_threshold = 0.1  # Minimum value to trigger a discrete update
+        # Convert to discrete space (negative for gradient descent)
+        phase_continuous = -phase_learning_rate * phase_grad / phase_resolution
+        mag_continuous = -magnitude_learning_rate * mag_grad / mag_resolution
         
-        # Convert to discrete updates (negative for gradient descent)
-        phase_continuous = -learning_rate * phase_grad / phase_resolution
-        mag_continuous = -learning_rate * mag_grad / mag_resolution
+        # Initialize accumulator for this node if needed
+        if node_id is not None and node_id not in self.discrete_grad_accumulator:
+            self.discrete_grad_accumulator[node_id] = {
+                'phase': torch.zeros_like(phase_continuous),
+                'mag': torch.zeros_like(mag_continuous)
+            }
         
-        # Apply enhanced quantization:
-        # 1. Use sign to preserve direction
-        # 2. Apply minimum threshold for small gradients
-        # 3. Use ceiling for values above threshold to ensure updates happen
-        
-        discrete_phase_updates = torch.where(
-            torch.abs(phase_continuous) >= min_update_threshold,
-            torch.sign(phase_continuous) * torch.ceil(torch.abs(phase_continuous)),
-            torch.where(
-                torch.abs(phase_continuous) > 1e-6,  # Very small but non-zero
-                torch.sign(phase_continuous),  # At least ±1 update
+        # Apply discrete gradient accumulation if node_id provided
+        if node_id is not None:
+            # Accumulate gradients
+            self.discrete_grad_accumulator[node_id]['phase'] += phase_continuous
+            self.discrete_grad_accumulator[node_id]['mag'] += mag_continuous
+            
+            # Check if accumulated gradients exceed threshold
+            accumulated_phase = self.discrete_grad_accumulator[node_id]['phase']
+            accumulated_mag = self.discrete_grad_accumulator[node_id]['mag']
+            
+            # Determine discrete updates based on accumulated gradients
+            discrete_phase_updates = torch.zeros_like(accumulated_phase, dtype=torch.long)
+            discrete_mag_updates = torch.zeros_like(accumulated_mag, dtype=torch.long)
+            
+            # Phase updates: apply when accumulated gradient exceeds threshold
+            phase_update_mask = torch.abs(accumulated_phase) >= self.accumulation_threshold
+            if torch.any(phase_update_mask):
+                # Apply discrete updates and reset accumulator for those dimensions
+                discrete_phase_updates[phase_update_mask] = torch.sign(
+                    accumulated_phase[phase_update_mask]
+                ).long()
+                self.discrete_grad_accumulator[node_id]['phase'][phase_update_mask] = 0.0
+            
+            # Magnitude updates: apply when accumulated gradient exceeds threshold
+            mag_update_mask = torch.abs(accumulated_mag) >= self.accumulation_threshold
+            if torch.any(mag_update_mask):
+                # Apply discrete updates and reset accumulator for those dimensions
+                discrete_mag_updates[mag_update_mask] = torch.sign(
+                    accumulated_mag[mag_update_mask]
+                ).long()
+                self.discrete_grad_accumulator[node_id]['mag'][mag_update_mask] = 0.0
+            
+        else:
+            # Fallback: immediate quantization without accumulation
+            discrete_phase_updates = torch.where(
+                torch.abs(phase_continuous) >= 0.1,
+                torch.sign(phase_continuous),
                 torch.zeros_like(phase_continuous)
-            )
-        ).long()
-        
-        discrete_mag_updates = torch.where(
-            torch.abs(mag_continuous) >= min_update_threshold,
-            torch.sign(mag_continuous) * torch.ceil(torch.abs(mag_continuous)),
-            torch.where(
-                torch.abs(mag_continuous) > 1e-6,  # Very small but non-zero
-                torch.sign(mag_continuous),  # At least ±1 update
+            ).long()
+            
+            discrete_mag_updates = torch.where(
+                torch.abs(mag_continuous) >= 0.1,
+                torch.sign(mag_continuous),
                 torch.zeros_like(mag_continuous)
-            )
-        ).long()
+            ).long()
         
         # Debug information (can be removed in production)
         if torch.any(discrete_phase_updates != 0) or torch.any(discrete_mag_updates != 0):
@@ -370,6 +406,30 @@ class HighResolutionLookupTables(nn.Module):
                   f"Mag={torch.sum(torch.abs(discrete_mag_updates)).item():.0f} changes")
         
         return discrete_phase_updates, discrete_mag_updates
+    
+    def get_accumulator_stats(self, node_id: str) -> dict:
+        """Get statistics about gradient accumulation for a specific node."""
+        if node_id not in self.discrete_grad_accumulator:
+            return {'phase_accumulated': 0.0, 'mag_accumulated': 0.0, 'ready_for_update': False}
+        
+        acc = self.discrete_grad_accumulator[node_id]
+        phase_max = torch.max(torch.abs(acc['phase'])).item()
+        mag_max = torch.max(torch.abs(acc['mag'])).item()
+        
+        return {
+            'phase_accumulated': phase_max,
+            'mag_accumulated': mag_max,
+            'ready_for_update': phase_max >= self.accumulation_threshold or mag_max >= self.accumulation_threshold,
+            'threshold': self.accumulation_threshold
+        }
+    
+    def reset_accumulator(self, node_id: str = None):
+        """Reset gradient accumulator for specific node or all nodes."""
+        if node_id is not None:
+            if node_id in self.discrete_grad_accumulator:
+                del self.discrete_grad_accumulator[node_id]
+        else:
+            self.discrete_grad_accumulator.clear()
     
     def apply_discrete_updates(self, current_phase_indices: torch.Tensor,
                              current_mag_indices: torch.Tensor,

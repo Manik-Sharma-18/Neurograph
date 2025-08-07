@@ -17,11 +17,11 @@ architecture:
   vector_dim: 5  # Optimal balance of expressiveness and performance
   seed: 42
 
-# Resolution Settings - Balanced for performance and accuracy
+# Resolution Settings - High resolution for maximum gradient effectiveness
 resolution:
-  phase_bins: 32    # Reduced from 64 for better GPU utilization
-  mag_bins: 512     # Reduced from 1024 for memory efficiency
-  resolution_increase: 8  # 8x improvement over legacy (32*512 vs 8*256)
+  phase_bins: 512   # Dramatically increased for gradient effectiveness
+  mag_bins: 1024    # Increased for finer magnitude control
+  resolution_increase: 128  # 128x improvement over legacy (512*1024 vs 8*256)
 
 # Graph Structure - Optimized connectivity
 graph_structure:
@@ -58,18 +58,26 @@ loss_function:
   temperature: 1.0
   label_smoothing: 0.0
 
-# Training Configuration - Optimized for enhanced input adapter
+# Training Configuration - Dual learning rates for maximum effectiveness
 training:
   gradient_accumulation:
-    enabled: true
-    accumulation_steps: 8     # Optimal for RTX 3050
-    lr_scaling: "sqrt"        # √8 = 2.83x scaling
-    buffer_size: 1500         # Increased buffer for better utilization
+    enabled: false            # DISABLED - using direct dual learning rates
+    accumulation_steps: 8     # Kept for reference
+    lr_scaling: "sqrt"        # Not used with dual rates
+    buffer_size: 1500         # Not used with dual rates
   
   optimizer:
     type: "discrete_sgd"
-    base_learning_rate: 0.003    # Increased 4x to address parameter stagnation
-    effective_learning_rate: 0.003  # Override √8 scaling initially for discrete updates
+    base_learning_rate: 0.01     # Increased for better gradient utilization
+    
+    # Dual Learning Rate System - NEW
+    dual_learning_rates:
+      enabled: true
+      phase_learning_rate: 0.015     # Aggressive for phase updates
+      magnitude_learning_rate: 0.012 # Balanced for magnitude updates
+      phase_lr_ratio: 1.5            # 1.5x base rate
+      magnitude_lr_ratio: 1.2        # 1.2x base rate
+    
     warmup_epochs: 3             # Increased for enhanced adapter
     num_epochs: 15               # Production training length
     batch_size: 8                # Optimal batch size for training

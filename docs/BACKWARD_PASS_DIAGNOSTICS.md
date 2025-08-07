@@ -45,7 +45,8 @@ Parameter Updates Discrete Gradients  Performance Tracking
 
 - **Quantization Analysis**: Measures information loss during continuous-to-discrete conversion
 - **Update Effectiveness Scoring**: Evaluates how well continuous gradients translate to discrete updates
-- **Cosine Similarity Metrics**: Tracks alignment between expected and actual updates
+- **Ratio-Based Effectiveness**: Measures actual discrete changes vs. expected discrete changes
+- **Learning Rate Integration**: Accounts for learning rate in effectiveness calculation
 
 ### 4. Training Stability Detection
 

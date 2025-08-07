@@ -9,7 +9,7 @@ import time
 from typing import Dict, List, Tuple, Optional
 from collections import defaultdict
 
-from core.activation_table import ActivationTable
+from core.activation_table import VectorizedActivationTable
 from utils.device_manager import get_device
 
 

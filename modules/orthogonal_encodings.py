@@ -73,23 +73,21 @@ class OrthogonalClassEncoder:
     
     def generate_orthogonal_encodings(self) -> Dict[int, Tuple[torch.Tensor, torch.Tensor]]:
         """
-        Generate orthogonal class encodings using QR decomposition.
+        Generate orthogonal class encodings with improved discrete space preservation.
         
         Returns:
             Dictionary mapping class_id -> (phase_indices, mag_indices)
         """
-        # Method 1: QR decomposition for true orthogonality
-        if self.encoding_dim >= self.num_classes:
-            encodings = self._generate_qr_orthogonal()
-        else:
-            # Method 2: Gram-Schmidt for lower dimensions
-            encodings = self._generate_gram_schmidt_orthogonal()
+        print(f"🔄 Generating new orthogonal encodings...")
         
-        # Convert to discrete phase-magnitude indices
-        class_encodings = {}
-        for class_id in range(self.num_classes):
-            phase_indices, mag_indices = self._vectorize_to_phase_mag(encodings[class_id])
-            class_encodings[class_id] = (phase_indices, mag_indices)
+        # Method 1: Generate continuous orthogonal vectors
+        if self.encoding_dim >= self.num_classes:
+            continuous_encodings = self._generate_qr_orthogonal()
+        else:
+            continuous_encodings = self._generate_gram_schmidt_orthogonal()
+        
+        # Method 2: IMPROVED - Convert to discrete space with orthogonality preservation
+        class_encodings = self._optimize_discrete_orthogonality(continuous_encodings)
         
         return class_encodings
     
@@ -136,6 +134,171 @@ class OrthogonalClassEncoder:
             encodings[i] = v
         
         return encodings
+    
+    def _optimize_discrete_orthogonality(self, continuous_encodings: Dict[int, np.ndarray]) -> Dict[int, Tuple[torch.Tensor, torch.Tensor]]:
+        """
+        IMPROVED: Convert continuous orthogonal vectors to discrete space while preserving orthogonality.
+        
+        This method uses iterative optimization to find discrete encodings that maintain
+        maximum orthogonality in the actual signal space used by the lookup tables.
+        
+        Args:
+            continuous_encodings: Dictionary of continuous orthogonal vectors
+            
+        Returns:
+            Dictionary mapping class_id -> (phase_indices, mag_indices)
+        """
+        from core.high_res_tables import HighResolutionLookupTables
+        
+        # Initialize lookup tables for signal computation
+        lookup = HighResolutionLookupTables(self.phase_bins, self.mag_bins, self.device)
+        
+        # Step 1: Initial quantization using improved method
+        class_encodings = {}
+        for class_id, continuous_vector in continuous_encodings.items():
+            phase_indices, mag_indices = self._improved_vectorize_to_phase_mag(continuous_vector)
+            class_encodings[class_id] = (phase_indices, mag_indices)
+        
+        # Step 2: Iterative refinement to improve orthogonality
+        max_iterations = 50
+        best_orthogonality_score = -1.0
+        best_encodings = class_encodings.copy()
+        
+        for iteration in range(max_iterations):
+            # Compute current orthogonality score
+            current_score = self._compute_discrete_orthogonality_score(class_encodings, lookup)
+            
+            if current_score > best_orthogonality_score:
+                best_orthogonality_score = current_score
+                best_encodings = {k: (v[0].clone(), v[1].clone()) for k, v in class_encodings.items()}
+            
+            # Try small perturbations to improve orthogonality
+            improved = False
+            for class_id in range(self.num_classes):
+                phase_idx, mag_idx = class_encodings[class_id]
+                
+                # Try small perturbations
+                for dim in range(min(3, self.encoding_dim)):  # Only perturb first few dimensions
+                    for delta in [-1, 1]:
+                        # Try phase perturbation
+                        new_phase_idx = phase_idx.clone()
+                        new_phase_idx[dim] = (new_phase_idx[dim] + delta) % self.phase_bins
+                        
+                        # Test this perturbation
+                        test_encodings = class_encodings.copy()
+                        test_encodings[class_id] = (new_phase_idx, mag_idx)
+                        
+                        test_score = self._compute_discrete_orthogonality_score(test_encodings, lookup)
+                        if test_score > current_score:
+                            class_encodings[class_id] = (new_phase_idx, mag_idx)
+                            current_score = test_score
+                            improved = True
+                            break
+                        
+                        # Try magnitude perturbation
+                        new_mag_idx = mag_idx.clone()
+                        new_mag_idx[dim] = torch.clamp(new_mag_idx[dim] + delta, 0, self.mag_bins - 1)
+                        
+                        test_encodings = class_encodings.copy()
+                        test_encodings[class_id] = (phase_idx, new_mag_idx)
+                        
+                        test_score = self._compute_discrete_orthogonality_score(test_encodings, lookup)
+                        if test_score > current_score:
+                            class_encodings[class_id] = (phase_idx, new_mag_idx)
+                            current_score = test_score
+                            improved = True
+                            break
+                    
+                    if improved:
+                        break
+                
+                if improved:
+                    break
+            
+            # Early stopping if no improvement
+            if not improved:
+                break
+        
+        print(f"   🔧 Discrete optimization: {iteration+1} iterations, "
+              f"orthogonality score: {best_orthogonality_score:.4f}")
+        
+        return best_encodings
+    
+    def _improved_vectorize_to_phase_mag(self, continuous_vector: np.ndarray) -> Tuple[torch.Tensor, torch.Tensor]:
+        """
+        IMPROVED: Convert continuous vector to discrete indices with better orthogonality preservation.
+        
+        Args:
+            continuous_vector: Numpy array of shape [encoding_dim]
+            
+        Returns:
+            Tuple of (phase_indices, mag_indices) as LongTensors
+        """
+        # Method 1: Use polar coordinate transformation for better separation
+        # Convert to complex representation for each dimension pair
+        phase_indices = []
+        mag_indices = []
+        
+        for i in range(self.encoding_dim):
+            if i < len(continuous_vector):
+                val = continuous_vector[i]
+            else:
+                val = 0.0
+            
+            # Phase: map value to phase using arctangent-like function
+            # This provides better distribution across phase space
+            phase_val = (np.arctan(val * 2) + np.pi/2) / np.pi * 2 * np.pi  # [0, 2π]
+            phase_idx = int(phase_val / (2 * np.pi) * self.phase_bins)
+            phase_idx = np.clip(phase_idx, 0, self.phase_bins - 1)
+            phase_indices.append(phase_idx)
+            
+            # Magnitude: use sigmoid-like mapping for better distribution
+            mag_val = 1 / (1 + np.exp(-val * 3))  # Sigmoid: [0, 1]
+            mag_idx = int(mag_val * self.mag_bins)
+            mag_idx = np.clip(mag_idx, 0, self.mag_bins - 1)
+            mag_indices.append(mag_idx)
+        
+        return (torch.tensor(phase_indices, dtype=torch.long, device=self.device),
+                torch.tensor(mag_indices, dtype=torch.long, device=self.device))
+    
+    def _compute_discrete_orthogonality_score(self, class_encodings: Dict[int, Tuple[torch.Tensor, torch.Tensor]], 
+                                            lookup: 'HighResolutionLookupTables') -> float:
+        """
+        Compute orthogonality score for discrete encodings using actual signal vectors.
+        
+        Args:
+            class_encodings: Dictionary of discrete encodings
+            lookup: Lookup tables for signal computation
+            
+        Returns:
+            Orthogonality score (higher is better, 1.0 is perfect)
+        """
+        # Compute signal vectors for all classes
+        signal_vectors = {}
+        for class_id, (phase_idx, mag_idx) in class_encodings.items():
+            signal_vectors[class_id] = lookup.get_signal_vector(phase_idx, mag_idx)
+        
+        # Compute pairwise cosine similarities
+        similarities = []
+        for i in range(self.num_classes):
+            for j in range(i + 1, self.num_classes):
+                vec_i = signal_vectors[i]
+                vec_j = signal_vectors[j]
+                
+                # Normalize vectors
+                vec_i_norm = vec_i / (torch.norm(vec_i) + 1e-8)
+                vec_j_norm = vec_j / (torch.norm(vec_j) + 1e-8)
+                
+                # Compute cosine similarity
+                similarity = torch.dot(vec_i_norm, vec_j_norm).abs().item()
+                similarities.append(similarity)
+        
+        # Orthogonality score: 1.0 - mean absolute similarity
+        # Perfect orthogonality (all similarities = 0) gives score = 1.0
+        mean_similarity = np.mean(similarities)
+        orthogonality_score = 1.0 - mean_similarity
+        
+        return orthogonality_score
     
     def _vectorize_to_phase_mag(self, continuous_vector: np.ndarray) -> Tuple[torch.Tensor, torch.Tensor]:
         """

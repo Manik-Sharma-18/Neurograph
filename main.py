@@ -106,6 +106,30 @@ def evaluate_model(trainer, num_samples=None, use_batch_evaluation=False):
     )
     
     print(f"Accuracy: {accuracy:.1%} (evaluated on {num_samples} samples)")
+    
+    # Print diagnostic summary if available
+    if hasattr(trainer, 'get_diagnostic_summary'):
+        diagnostic_summary = trainer.get_diagnostic_summary()
+        if diagnostic_summary:
+            print(f"\n📊 Training Diagnostics Summary:")
+            
+            # Show gradient effectiveness
+            discrete_update_analysis = diagnostic_summary.get('discrete_update_analysis', {})
+            if discrete_update_analysis:
+                effectiveness = discrete_update_analysis.get('mean_effectiveness', {})
+                if effectiveness:
+                    print(f"   🎯 Gradient Effectiveness: {effectiveness.get('mean', 0.0):.1%} ± {effectiveness.get('std', 0.0):.1%}")
+            
+            # Show parameter update stats
+            backward_diagnostics = diagnostic_summary.get('backward_pass_diagnostics', {})
+            if backward_diagnostics:
+                param_stats = backward_diagnostics.get('parameter_updates', {})
+                if param_stats:
+                    phase_changes = param_stats.get('avg_phase_change', {})
+                    mag_changes = param_stats.get('avg_mag_change', {})
+                    if phase_changes and mag_changes:
+                        print(f"   📈 Parameter Changes: Phase={phase_changes.get('mean', 0.0):.3f}, Mag={mag_changes.get('mean', 0.0):.3f}")
+    
     return accuracy
 
 
