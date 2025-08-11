@@ -78,16 +78,16 @@ training:
       phase_lr_ratio: 1.5            # 1.5x base rate
       magnitude_lr_ratio: 1.2        # 1.2x base rate
     
-    warmup_epochs: 3             # Increased for enhanced adapter
+    warmup_epochs: 0             # Warmup disabled - consistent training throughout
     num_epochs: 15               # Production training length
-    batch_size: 8                # Optimal batch size for training
+    batch_size: 200              # Increased for meaningful training (was 8)
     gradient_clipping: 1.0       # Prevent exploding gradients in deep network
   
   # Quick evaluation mode for development
   quick_mode:
     epochs: 5                    # Increased for better testing
-    warmup_epochs: 2
-    batch_size: 4
+    warmup_epochs: 0             # Warmup disabled - consistent with main training
+    batch_size: 100              # Increased for meaningful testing (was 4)
 
 # Forward Pass - Quality-focused signal propagation with high strength threshold
 forward_pass:
@@ -183,6 +183,19 @@ export:
   export_onnx: false          # Disabled for discrete models
   save_training_curves: true
   save_performance_stats: true
+
+# Diagnostics Configuration - Comprehensive backward pass monitoring
+diagnostics:
+  enabled: true                           # Enable diagnostic system
+  alerts_enabled: true                    # Enable stability alerts
+  gradient_explosion_threshold: 10.0      # Alert if gradient norm > 10.0
+  gradient_vanishing_threshold: 1e-6      # Alert if gradient norm < 1e-6
+  parameter_stagnation_threshold: 1e-8    # Alert if parameter changes < 1e-8
+  loss_spike_threshold: 2.0               # Alert if loss increases by 2x
+  memory_usage_threshold: 1000.0          # Alert if memory usage > 1000MB
+  save_diagnostic_data: true              # Save diagnostic data to files
+  print_per_sample_diagnostics: true      # Print diagnostics for each sample
+  verbose_backward_pass: true             # Detailed backward pass logging
 
 # Production Flags
 production:

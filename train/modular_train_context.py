@@ -226,7 +226,7 @@ class ModularTrainContext:
         self.base_lr = self.config.get('training.optimizer.base_learning_rate')
         self.effective_lr = self.config.get('training.optimizer.effective_learning_rate', self.base_lr)
         self.num_epochs = self.config.get('training.optimizer.num_epochs')
-        self.warmup_epochs = self.config.get('training.optimizer.warmup_epochs')
+        # Warmup removed - consistent training throughout all epochs
         
         print(f"   ✅ Training components initialized")
         print(f"      📊 Gradient accumulation: {grad_config.get('enabled')}")

@@ -307,10 +307,8 @@ def main():
             # Quick test mode
             if args.quick:
                 quick_epochs = trainer.config.get('training.quick_mode.epochs', 5)
-                quick_warmup = trainer.config.get('training.quick_mode.warmup_epochs', 2)
                 print(f"⚡ Quick mode: {quick_epochs} epochs" if args.production else f"Quick test mode: {quick_epochs} epochs")
                 trainer.num_epochs = quick_epochs
-                trainer.warmup_epochs = quick_warmup
             
             # Training
             print(f"\n🎯 Starting Training ({trainer.num_epochs} epochs)" if args.production else f"Starting training ({trainer.num_epochs} epochs)...")
