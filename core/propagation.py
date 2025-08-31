@@ -11,9 +11,10 @@ def propagate_step(
     phase_cell: ModularPhaseCell,
     graph_df,
     lookup_table,
-    use_radiation: bool = True,
-    top_k_neighbors: int = 4,
-    radiation_batch_size: int = 64,
+    use_radiation: bool,
+    top_k_neighbors: int,
+    radiation_batch_size: int,
+    phase_bins: int,
     device='cpu'
 ):
     """
@@ -54,6 +55,7 @@ def propagate_step(
                 graph_df=graph_df,
                 lookup_table=lookup_table,
                 top_k=top_k_neighbors,
+                phase_bins=phase_bins,
                 batch_size=radiation_batch_size
             )
             all_targets += dynamic_targets

@@ -19,7 +19,7 @@ from typing import Optional
 from train.modular_train_context import create_modular_train_context
 
 
-def set_seeds(seed=42):
+def set_seeds(seed):
     """Set random seeds for reproducibility."""
     random.seed(seed)
     np.random.seed(seed)
@@ -65,30 +65,41 @@ def plot_training_curves(losses, accuracies=None, save_path=None, config=None):
     
     os.makedirs(os.path.dirname(save_path), exist_ok=True)
     
+    # Get visualization settings from config
+    viz_config = config.get('visualization', {}) if config else {}
+    figure_width = viz_config.get('figure_width', 10)
+    figure_height = viz_config.get('figure_height', 6)
+    line_width = viz_config.get('line_width', 2)
+    grid_alpha = viz_config.get('grid_alpha', 0.3)
+    font_size_title = viz_config.get('font_size_title', 14)
+    font_size_label = viz_config.get('font_size_label', 12)
+    dpi = viz_config.get('dpi', 300)
+    bbox_inches = viz_config.get('bbox_inches', 'tight')
+    
     if accuracies:
-        fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(15, 6))
+        fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(figure_width + 5, figure_height))
     else:
-        fig, ax1 = plt.subplots(1, 1, figsize=(10, 6))
+        fig, ax1 = plt.subplots(1, 1, figsize=(figure_width, figure_height))
     
     # Loss curve
-    ax1.plot(losses, 'b-', linewidth=2, label='Training Loss')
-    ax1.set_title('NeuroGraph Training Loss', fontsize=14, fontweight='bold')
-    ax1.set_xlabel('Epoch', fontsize=12)
-    ax1.set_ylabel('Loss', fontsize=12)
-    ax1.grid(True, alpha=0.3)
+    ax1.plot(losses, 'b-', linewidth=line_width, label='Training Loss')
+    ax1.set_title('NeuroGraph Training Loss', fontsize=font_size_title, fontweight='bold')
+    ax1.set_xlabel('Epoch', fontsize=font_size_label)
+    ax1.set_ylabel('Loss', fontsize=font_size_label)
+    ax1.grid(True, alpha=grid_alpha)
     ax1.legend()
     
     # Accuracy curve (if available)
     if accuracies:
-        ax2.plot(accuracies, 'g-', linewidth=2, label='Validation Accuracy')
-        ax2.set_title('NeuroGraph Validation Accuracy', fontsize=14, fontweight='bold')
-        ax2.set_xlabel('Validation Check', fontsize=12)
-        ax2.set_ylabel('Accuracy', fontsize=12)
-        ax2.grid(True, alpha=0.3)
+        ax2.plot(accuracies, 'g-', linewidth=line_width, label='Validation Accuracy')
+        ax2.set_title('NeuroGraph Validation Accuracy', fontsize=font_size_title, fontweight='bold')
+        ax2.set_xlabel('Validation Check', fontsize=font_size_label)
+        ax2.set_ylabel('Accuracy', fontsize=font_size_label)
+        ax2.grid(True, alpha=grid_alpha)
         ax2.legend()
     
     plt.tight_layout()
-    plt.savefig(save_path, dpi=300, bbox_inches='tight')
+    plt.savefig(save_path, dpi=dpi, bbox_inches=bbox_inches)
     plt.close()
     print(f"Training curves saved to: {save_path}")
 
@@ -187,9 +198,10 @@ def run_evaluate_mode(trainer, evaluation_samples, production_mode):
             from core.batch_evaluation_engine import create_batch_evaluation_engine
             device = 'cuda' if torch.cuda.is_available() else 'cpu'
             
-            # Create batch evaluator
+            # Create batch evaluator with config-based batch size
+            batch_size = trainer.config.get('batch_evaluation.batch_size', 16)
             batch_evaluator = create_batch_evaluation_engine(
-                trainer, batch_size=16, device=device, verbose=True
+                trainer, batch_size=batch_size, device=device, verbose=True
             )
             
             # Run evaluation
@@ -233,11 +245,11 @@ def main():
     parser.add_argument('--quick', action='store_true', 
                        help='Quick test mode (reduced epochs)')
     # Evaluation options
-    parser.add_argument('--eval-samples', type=int, default=100,
-                       help='Number of samples for evaluation')
+    parser.add_argument('--eval-samples', type=int, 
+                       help='Number of samples for evaluation (uses config default if not specified)')
     
     # Other options
-    parser.add_argument('--seed', type=int, default=42, help='Random seed')
+    parser.add_argument('--seed', type=int, help='Random seed (uses config default if not specified)')
     parser.add_argument('--checkpoint', type=str, help='Checkpoint to load')
     parser.add_argument('--no-plot', action='store_true', 
                        help='Disable training curve plotting')
@@ -263,17 +275,27 @@ def main():
     else:
         print("⚠️  Running on CPU (GPU recommended for optimal performance)")
     
-    # Set seeds for reproducibility
-    set_seeds(args.seed)
-    print(f"Random seed: {args.seed}")
-    
-    # Determine configuration file
+    # Determine configuration file first to get config-based defaults
     try:
         config_path = determine_config_file(args)
         print(f"Using configuration: {config_path}")
     except FileNotFoundError as e:
         print(f"❌ {e}")
         return None
+    
+    # Initialize training context to get config
+    print("🔧 Initializing training context..." if args.production else "Initializing training context...")
+    trainer = create_modular_train_context(config_path)
+    
+    # Set config-based defaults for arguments
+    if args.seed is None:
+        args.seed = trainer.config.get('architecture.seed', 42)
+    if args.eval_samples is None:
+        args.eval_samples = trainer.config.get('evaluation.default_samples', 100)
+    
+    # Set seeds for reproducibility
+    set_seeds(args.seed)
+    print(f"Random seed: {args.seed}")
     
     # Setup production monitoring if enabled
     profiler = None
@@ -282,9 +304,6 @@ def main():
         profiler, performance_monitor = setup_production_monitoring(device)
     
     try:
-        # Initialize training context
-        print("🔧 Initializing training context..." if args.production else "Initializing training context...")
-        trainer = create_modular_train_context(config_path)
         
         # Load checkpoint if specified
         if args.checkpoint:

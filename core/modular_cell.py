@@ -130,7 +130,7 @@ class ModularPhaseCell(nn.Module):
         
         return similarity.mean()  # Average across vector dimensions
 
-class BiologicalPhaseCell(ModularPhaseCell):
+'''class BiologicalPhaseCell(ModularPhaseCell):
     """
     Biologically-inspired variant with additional constraints.
     """
@@ -333,3 +333,4 @@ def create_phase_cell(cell_type: str = "modular", **kwargs) -> ModularPhaseCell:
 
 # Backward compatibility alias
 PhaseCell = ModularPhaseCell
+'''

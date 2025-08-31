@@ -28,6 +28,7 @@ def get_radiation_neighbors(
     graph_df,
     lookup_table,
     top_k: int,
+    phase_bins: int,  # ADD: Phase bins parameter
     batch_size: int = 128  # Increased from 64 for better GPU utilization
 ) -> List[str]:
     """
@@ -49,7 +50,7 @@ def get_radiation_neighbors(
     global _cache_stats
     
     # Level 1: Check pattern cache (phase signature + top_k)
-    phase_signature = _compute_phase_signature(ctx_phase_idx)
+    phase_signature = _compute_phase_signature(ctx_phase_idx, phase_bins)
     pattern_key = (current_node_id, phase_signature, top_k)
     
     if pattern_key in _radiation_pattern_cache:
@@ -94,19 +95,23 @@ def get_radiation_neighbors(
     
     return selected_neighbors
 
-def _compute_phase_signature(ctx_phase_idx: torch.Tensor) -> int:
+def _compute_phase_signature(ctx_phase_idx: torch.Tensor, phase_bins: int) -> int:
     """
     Compute a compact signature for phase indices to enable pattern caching.
     
     Args:
         ctx_phase_idx: Phase index tensor [D]
+        phase_bins: Number of phase bins for adaptive quantization
         
     Returns:
         Integer signature for caching
     """
     # Use hash of phase indices as signature (quantized to reduce cache size)
-    # Quantize to reduce sensitivity to small phase changes
-    quantized_phases = (ctx_phase_idx // 4) * 4  # Quantize to multiples of 4
+    # Adaptive quantization based on actual phase_bins
+    # For 512 bins: quantize by 4 gives 128 effective signatures
+    # For 64 bins: quantize by 4 gives 16 effective signatures
+    quantization_factor = max(1, phase_bins // 128)  # Adaptive quantization
+    quantized_phases = (ctx_phase_idx // quantization_factor) * quantization_factor
     return hash(tuple(quantized_phases.cpu().numpy()))
 
 def _compute_radiation_neighbors_vectorized(

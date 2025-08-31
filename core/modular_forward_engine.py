@@ -205,17 +205,17 @@ class VectorizedForwardEngine:
         node_store: NodeStore,
         phase_cell,  # PhaseCell or ModularPhaseCell
         lookup_table,
-        max_nodes: int = 1000,
-        vector_dim: int = 8,
-        phase_bins: int = 64,
-        mag_bins: int = 512,
-        max_timesteps: int = 35,
-        decay_factor: float = 0.95,
-        min_strength: float = 0.001,
-        top_k_neighbors: int = 4,
+        max_nodes: int ,
+        vector_dim: int ,
+        phase_bins: int ,
+        mag_bins: int ,
+        max_timesteps: int ,
+        decay_factor: float ,
+        min_strength: float ,
+        top_k_neighbors: int ,
         use_radiation: bool = True,
-        radiation_batch_size: int = 128,
-        min_output_activation_timesteps: int = 2,
+        radiation_batch_size: int ,
+        min_output_activation_timesteps: int ,
         device: str = 'auto',
         verbose: bool = False
     ):
@@ -306,7 +306,7 @@ class VectorizedForwardEngine:
         print(f"   🎯 Output nodes: {len(self.output_nodes)}")
         print(f"   ⚡ GPU memory allocated: {self._estimate_total_memory():.2f} MB")
     
-    def _init_output_node_indices(self):
+    def _init_output_node_indices(self): #to be cleaned up , is redundant now with the updated FP termination condition.
         """Initialize output node indices tensor for propagation engine."""
         # Create a temporary propagation engine to get node mappings
         temp_propagation_engine = VectorizedPropagationEngine(
@@ -328,9 +328,9 @@ class VectorizedForwardEngine:
         valid_mask = self.output_node_indices >= 0
         self.output_node_indices = self.output_node_indices[valid_mask]
         
-        print(f"   🚫 Outputs excluded from radiation: {len(self.output_node_indices)}")
+        print(f"   🚫 Outputs excluded from radiation: {len(self.output_node_indices)}")###
     
-    def _init_vectorized_components(self):
+    def _init_vectorized_components(self): ### TBR , Not compatible with change of databases
         """Initialize all vectorized components."""
         # Vectorized activation table
         self.activation_table = VectorizedActivationTable(
@@ -355,7 +355,7 @@ class VectorizedForwardEngine:
         # Pre-allocate tensors for batch operations
         self._init_batch_tensors()
     
-    def _init_batch_tensors(self):
+    def _init_batch_tensors(self): ### TBR, '''
         """Initialize pre-allocated tensors for batch operations."""
         # Batch processing tensors
         self.batch_target_indices = torch.zeros(
@@ -390,7 +390,7 @@ class VectorizedForwardEngine:
         valid_mask = self.output_node_indices >= 0
         self.output_node_indices = self.output_node_indices[valid_mask]
     
-    def _estimate_total_memory(self) -> float:
+    def _estimate_total_memory(self) -> float: ### TBC ,Useful for diagnostics
         """Estimate total GPU memory usage in MB."""
         activation_memory = self.activation_table._estimate_gpu_memory()
         
@@ -409,7 +409,7 @@ class VectorizedForwardEngine:
     
     def forward_pass_vectorized(
         self, 
-        input_context: Dict[str, Tuple[torch.Tensor, torch.Tensor]]
+        input_context: Dict[str, Tuple[torch.Tensor, torch.Tensor]] ###Seperate app. functions (input context, etc)
     ) -> VectorizedActivationTable:
         """
         Perform vectorized forward pass with GPU optimization.
@@ -423,17 +423,17 @@ class VectorizedForwardEngine:
         start_time = time.time()
         
         # Clear activation table
-        self.activation_table.clear()
+        self.activation_table.clear() ###Activation table to be reworked,keeping track of current and old act. nodes (history)
         
         # Inject initial input context using batch injection
-        self._inject_input_context_batch(input_context)
+        self._inject_input_context_batch(input_context)  ### TBC
         
         if self.verbose:
             print(f"🚀 Starting vectorized forward propagation")
             print(f"   📊 Input nodes: {list(input_context.keys())}")
             print(f"   🎯 Output nodes: {list(self.output_nodes)}")
             print(f"   💾 Device: {self.device}")
-        
+        ### Many parts below to be extracted out and modularized to multiple functions
         # Vectorized propagation loop
         timestep = 0
         timestep_times = []
@@ -451,7 +451,7 @@ class VectorizedForwardEngine:
             
             # Check for output activation using vectorized operations
             output_active = self._check_output_activation_vectorized(active_indices)
-            
+            ###Diagnostic to be handled asynchronously("Out" of this function,otherwise this would become a bottleneck)
             if self.verbose:
                 print(f"\n⏱️ Timestep {timestep}")
                 print(f"   🔹 Active nodes: {len(active_indices)}")
@@ -477,7 +477,7 @@ class VectorizedForwardEngine:
                     ]
                     print(f"   ✅ Active outputs detected: {active_output_nodes}")
             
-            # Enhanced termination with graph topology awareness
+            # Enhanced termination with graph topology awareness  ###TBR , have two seperate functions (for one-shot and continuous input)
             if (timestep >= self.min_required_timesteps and output_active.any()):
                 if self.verbose:
                     print(f"✅ Output activation detected at timestep {timestep}")
@@ -865,10 +865,10 @@ def create_vectorized_forward_engine(
         node_store=node_store,
         phase_cell=phase_cell,
         lookup_table=lookup_table,
-        max_nodes=config.get('architecture', {}).get('total_nodes', 1000) + 200,
+        max_nodes=config.get('architecture', {}).get('total_nodes', 1000) ,
         vector_dim=config.get('architecture', {}).get('vector_dim', 5),
-        phase_bins=config.get('resolution', {}).get('phase_bins', 64),
-        mag_bins=config.get('resolution', {}).get('mag_bins', 512),
+        phase_bins=config.get('resolution', {}).get('phase_bins', 512),
+        mag_bins=config.get('resolution', {}).get('mag_bins', 1024),
         max_timesteps=config.get('forward_pass', {}).get('max_timesteps', 35),
         decay_factor=config.get('forward_pass', {}).get('decay_factor', 0.95),
         min_strength=config.get('forward_pass', {}).get('min_activation_strength', 0.001),

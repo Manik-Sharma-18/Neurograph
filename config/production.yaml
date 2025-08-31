@@ -32,6 +32,7 @@ graph_structure:
 # Radiation System - Maximized for GPU throughput
 radiation:
   batch_size: 128        # Increased for better GPU utilization
+  top_k_neighbors: 4     # Dynamic radiation neighbors
   cache_enabled: true
   max_cache_size: 1000   # Optimized cache size
   quantization_level: 4  # Phase signature quantization
@@ -162,6 +163,27 @@ debugging:
   evaluation_samples: 100      # Reduced to 100 for faster evaluation
   final_evaluation_samples: 100   # Reduced to 100 for faster evaluation
   enable_profiling: false
+
+# Evaluation Settings - Centralized sample counts and parameters
+evaluation:
+  default_samples: 100         # Default evaluation sample count
+  quick_samples: 50           # Quick evaluation sample count
+  comprehensive_samples: 500   # Comprehensive evaluation sample count
+  validation_samples: 200     # Validation sample count
+  test_samples: 300          # Test sample count
+  benchmark_samples: 1000    # Benchmark evaluation sample count
+
+# Visualization Settings - Plotting and output parameters
+visualization:
+  dpi: 300                   # Plot resolution
+  figure_width: 10           # Figure width in inches
+  figure_height: 6           # Figure height in inches
+  line_width: 2              # Plot line width
+  grid_alpha: 0.3            # Grid transparency
+  font_size_title: 14        # Title font size
+  font_size_label: 12        # Label font size
+  font_size_legend: 10       # Legend font size
+  bbox_inches: "tight"       # Bounding box for saved plots
 
 # Fallback Configuration
 fallback:

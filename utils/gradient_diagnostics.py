@@ -235,8 +235,8 @@ class BackwardPassDiagnostics:
                     
                     # Calculate discrete parameter changes
                     # Get phase_bins and mag_bins from the lookup tables or config
-                    phase_bins = getattr(node_store, 'phase_bins', 64)  # Default fallback updated
-                    mag_bins = getattr(node_store, 'mag_bins', 512)     # Default fallback
+                    phase_bins = getattr(node_store, 'phase_bins', 512)  # Default fallback updated
+                    mag_bins = getattr(node_store, 'mag_bins', 1024)     # Default fallback updated
                     
                     phase_change = self._calculate_discrete_change(prev_phase, current_phase, phase_bins)
                     mag_change = self._calculate_discrete_change(prev_mag, current_mag, mag_bins)

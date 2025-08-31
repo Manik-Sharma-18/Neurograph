@@ -1,6 +1,6 @@
 """
 High-Resolution Lookup Tables for Modular NeuroGraph
-Supports 64 phase bins and 1024 magnitude bins (16x resolution increase)
+Supports configurable phase bins (default: 512) and magnitude bins (default: 1024)
 Optimized with JIT compilation for critical operations
 """
 

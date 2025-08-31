@@ -225,7 +225,7 @@ class VectorizedPropagationEngine:
         
         # Batch phase cell computation
         filtered_target_indices, new_phases, new_mags, strengths = self._compute_phase_cell_batch(
-            source_tensor, target_tensor, active_indices, active_phases, active_mags
+            source_tensor, target_tensor, active_indices, active_phases, active_mags, radiation_batch_size
         )
         
         # Update statistics
@@ -452,7 +452,8 @@ class VectorizedPropagationEngine:
         target_indices: torch.Tensor,
         active_indices: torch.Tensor,
         active_phases: torch.Tensor,
-        active_mags: torch.Tensor
+        active_mags: torch.Tensor,
+        radiation_batch_size: int
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """
         Batch computation of phase cell operations with excitatory/inhibitory filtering.
@@ -524,9 +525,8 @@ class VectorizedPropagationEngine:
         strengths_batch = torch.zeros(num_propagations, dtype=torch.float32, device=self.device)
         
         # Process in smaller batches to manage memory
-        batch_size = 64
-        for batch_start in range(0, num_propagations, batch_size):
-            batch_end = min(batch_start + batch_size, num_propagations)
+        for batch_start in range(0, num_propagations, radiation_batch_size):
+            batch_end = min(batch_start + radiation_batch_size, num_propagations)
             
             batch_ctx_phases = source_phases_batch[batch_start:batch_end]
             batch_ctx_mags = source_mags_batch[batch_start:batch_end]

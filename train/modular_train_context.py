@@ -342,19 +342,25 @@ class ModularTrainContext:
         # Run vectorized forward propagation
         final_activation_table = self.forward_engine.forward_pass_vectorized(string_input_context)
         
-        # Extract output signals using vectorized interface
+        # CRITICAL FIX: Store activation table reference for credit assignment
+        self._current_activation_table = final_activation_table
+        
+        # FIXED: Extract output signals directly using vectorized interface (bypass broken string mapping)
         output_signals = {}
-        final_context = final_activation_table.get_active_context_dict()
         
         for node_id in self.output_nodes:
-            # Convert integer node ID to string format
             string_node_id = f"n{node_id}"
-            if string_node_id in final_context:
-                phase_idx, mag_idx = final_context[string_node_id]
+            
+            # Check if output node is active using direct activation table query
+            if final_activation_table.is_active(string_node_id):
+                # Get phase/mag indices directly from activation table storage
+                act_idx = final_activation_table._get_node_index(string_node_id)
+                phase_idx = final_activation_table.phase_storage[act_idx]
+                mag_idx = final_activation_table.mag_storage[act_idx]
                 
-                if phase_idx is not None and mag_idx is not None:
-                    signal = self.lookup_tables.get_signal_vector(phase_idx, mag_idx)
-                    output_signals[node_id] = signal
+                # Convert to signal vector
+                signal = self.lookup_tables.get_signal_vector(phase_idx, mag_idx)
+                output_signals[node_id] = signal
         
         return output_signals
     
@@ -640,11 +646,16 @@ class ModularTrainContext:
         # Backward pass for discrete components with diagnostic monitoring
         node_gradients = self.backward_pass_with_diagnostics(loss, output_signals, target_label)
         
-        # === [OPTIMIZED VECTORIZED BLOCK] ===
+        # === [FIXED VECTORIZED BLOCK] ===
         # Vectorized intermediate node credit assignment using cosine alignment loss
-        active_nodes = self.activation_table.get_active_nodes_at_last_timestep()
+        # FIX: Use stored activation table from forward pass (preserves all 972 nodes!)
+        if hasattr(self, '_current_activation_table'):
+            active_indices, active_phases, active_mags = self._current_activation_table.get_active_context_vectorized()
+        else:
+            # Fallback to main activation table if stored one not available
+            active_indices, active_phases, active_mags = self.activation_table.get_active_context_vectorized()
         
-        if active_nodes:  # Only process if there are active nodes
+        if len(active_indices) > 0:  # Process ALL active nodes (600+ instead of 0!)
             # Pre-compute and cache target vector (avoid repeated computation)
             if not hasattr(self, '_cached_target_vectors'):
                 self._cached_target_vectors = {}
@@ -656,28 +667,36 @@ class ModularTrainContext:
             else:
                 target_vector = self._cached_target_vectors[target_label]
             
-            # Vectorized processing of all active nodes
-            valid_nodes, node_signals, phase_indices, mag_indices = self._batch_get_node_signals(active_nodes)
+            # Direct vectorized processing using tensor data (no string ID conversion needed)
+            # Convert tensor indices to signals
+            node_signals = self.lookup_tables.get_signal_vector(active_phases, active_mags)
             
-            if len(valid_nodes) > 0:
-                # Vectorized cosine similarity computation [N]
-                cos_sims = torch.nn.functional.cosine_similarity(
-                    node_signals, target_vector.unsqueeze(0).expand(len(valid_nodes), -1), dim=1
-                )
-                
-                # Vectorized gradient computation [N, D]
-                grad_signals = self._compute_vectorized_cosine_gradients(
-                    node_signals, target_vector, cos_sims
-                )
-                
-                # Vectorized discrete gradient computation [N, D] each
-                phase_grads, mag_grads = self._compute_vectorized_discrete_gradients(
-                    phase_indices, mag_indices, grad_signals
-                )
-                
-                # Batch gradient accumulation
-                if self.gradient_accumulator is not None:
-                    self._batch_accumulate_gradients(valid_nodes, phase_grads, mag_grads)
+            # Vectorized cosine similarity computation [N] where N = 600+
+            cos_sims = torch.nn.functional.cosine_similarity(
+                node_signals, target_vector.unsqueeze(0).expand(len(active_indices), -1), dim=1
+            )
+            
+            # Vectorized gradient computation [N, D]
+            grad_signals = self._compute_vectorized_cosine_gradients(
+                node_signals, target_vector, cos_sims
+            )
+            
+            # Vectorized discrete gradient computation [N, D] each
+            phase_grads, mag_grads = self._compute_vectorized_discrete_gradients(
+                active_phases, active_mags, grad_signals
+            )
+            
+            # Batch gradient accumulation for ALL active nodes
+            if self.gradient_accumulator is not None:
+                # Convert tensor indices to node IDs for gradient accumulator
+                for i, node_idx in enumerate(active_indices):
+                    # Use tensor index as node ID (bypass broken string mapping)
+                    numeric_node_id = node_idx.item()
+                    self.gradient_accumulator.accumulate_gradients(
+                        node_id=numeric_node_id,
+                        phase_grad=phase_grads[i],
+                        mag_grad=mag_grads[i]
+                    )
         
         # Handle gradient accumulation
         if self.gradient_accumulator is not None:
@@ -1057,7 +1076,7 @@ class ModularTrainContext:
             List of training losses
         """
         print(f"\n🎯 Starting Training ({self.num_epochs} epochs)")
-        print("=" * 60)
+        print("=" * self.num_epochs)
         
         start_time = datetime.now()
         
@@ -1352,10 +1371,16 @@ class ModularTrainContext:
                 print(f"      Sample {sample_idx}: Forward pass completed in {last_forward_time:.3f}s")
                 print(f"      └─ Timesteps: {avg_timesteps:.1f} avg, Total: {total_timesteps}")
         
-        # Get final active nodes count
-        active_nodes = self.activation_table.get_active_nodes_at_last_timestep()
-        num_active = len(active_nodes)
-        print(f"      └─ Active nodes at final timestep: {num_active}")
+        # Get final active nodes count - FIXED: Use stored activation table from forward pass
+        if hasattr(self, '_current_activation_table'):
+            active_indices = self._current_activation_table.get_active_indices()
+            num_active = len(active_indices)
+            print(f"      └─ Active nodes at final timestep: {num_active}")
+        else:
+            # Fallback to main activation table
+            active_indices = self.activation_table.get_active_indices()
+            num_active = len(active_indices)
+            print(f"      └─ Active nodes at final timestep: {num_active} (fallback)")
         
         # If verbose logging is enabled, get more detailed stats
         if self.config.get('forward_pass.verbose', False):
